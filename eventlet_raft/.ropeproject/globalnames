@@ -1,8 +1,0 @@
-€}q(Unode]q(UNodeqULOGqUPeerqUmainqeUutil]q(ULOGGERSqU
-config_logq	eUlog]q
-UDiskJournalqaUsettings]q(U
-STM_OP_DELqU
-PING_CYCLEqU
-TICK_CYCLEqUELECTION_TIMEOUTqUJOURNAL_PREFIXqUROLE_LEADERqU
-VOTE_CYCLEqUROLE_CANDIDATEqUSNAPSHOT_FILE_NAME_PREFIXqUBUF_LENqUROLE_MEMBERqU
-STM_OP_SETqeUserver]q(ULOGqUServerqUmainqeUstate_machine]q(UStateMachineManagerqUDictStateMachineqeUmsg]q (Uget_append_entry_msgq!Uget_vote_msgq"Uget_vote_return_msgq#eu.
