@@ -5,7 +5,11 @@ import sys
 LOGGERS = ['Server', 'Client', 'Node']
 
 
-def config_log(output='STDOUT', level=logging.DEBUG):
+def config_log(output='STDOUT', level=logging.DEBUG, CONF=None):
+    if CONF:
+        output = CONF.get('logging', 'output')
+        level = getattr(logging, CONF.get('logging', 'level'))
+
     def _set_logger(logger_name, level, handler):
         logger = logging.getLogger(logger_name)
         logger.setLevel(level)

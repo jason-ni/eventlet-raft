@@ -2,6 +2,9 @@ import sys
 import eventlet
 from eventlet import event
 import logging
+import msgpack
+
+from .settings import BUF_LEN
 
 
 LOG = logging.getLogger('Server')
@@ -23,14 +26,15 @@ class Server(object):
 
     def _handle_node_sock(self, node_sock):
         LOG.debug("Get a node socket")
+        unpacker = msgpack.Unpacker()
         while True:
             try:
-                c = node_sock.recv(1024)
-                if not c:
+                chunk = node_sock.recv(BUF_LEN)
+                if not chunk:
                     break
-                LOG.debug("Get node message: %s" % c)
-                msg = c.strip()
-                self._on_handle_node_msg(msg)
+                unpacker.feed(chunk)
+                for unpacked_msg in unpacker:
+                    self._on_handle_node_msg(unpacked_msg)
             except Exception as e:
                 LOG.debug("node sock error: %s" % str(e))
                 break
@@ -42,7 +46,7 @@ class Server(object):
         LOG.debug("Get a client socket")
         while True:
             try:
-                c = client_sock.recv(1024)
+                c = client_sock.recv(BUF_LEN)
                 if not c:
                     break
                 LOG.debug("Get client message: %s" % c)
@@ -121,7 +125,7 @@ def main():
     from util import config_log
     from conf import set_conf
     set_conf('test.conf')
-    from conf import CONF
+    from .conf import CONF
     config_log()
     server = Server(CONF)
     server.start()
