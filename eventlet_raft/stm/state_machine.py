@@ -2,11 +2,29 @@ from cPickle import dump, load
 from glob import glob
 import os
 
-from .errors import StateMachineKeyDoesNotExist
-from .log import DiskJournal
-from .settings import ROLE_MEMBER
-from .settings import SNAPSHOT_FILE_NAME_PREFIX
-from .settings import JOURNAL_PREFIX
+from ..errors import StateMachineKeyDoesNotExist
+from ..log import DiskJournal
+from ..settings import ROLE_MEMBER
+from ..settings import SNAPSHOT_FILE_NAME_PREFIX
+from ..settings import JOURNAL_PREFIX
+
+
+class MemoryStateMachine(object):
+
+    def __init__(self):
+        self._stm = {}
+
+    def set(self, key, value):
+        self._stm[key] = value
+
+    def get(self, key):
+        try:
+            return self._stm[key]
+        except KeyError:
+            raise StateMachineKeyDoesNotExist(key=key)
+
+    def apply(self, command):
+        pass
 
 
 class DictStateMachine(object):

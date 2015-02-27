@@ -36,30 +36,26 @@ class Server(object):
                 for unpacked_msg in unpacker:
                     self._on_handle_node_msg(unpacked_msg)
             except Exception as e:
-                LOG.debug("node sock error: %s" % str(e))
+                LOG.exception("node sock error: %s" % str(e))
                 break
 
     def _on_handle_node_msg(self, msg):
         pass
 
     def _handle_client_sock(self, client_sock):
-        LOG.debug("Get a client socket")
+        LOG.info("Get a client socket")
+        unpacker = msgpack.Unpacker()
         while True:
             try:
-                c = client_sock.recv(BUF_LEN)
-                if not c:
+                chunk = client_sock.recv(BUF_LEN)
+                if not chunk:
                     break
-                LOG.debug("Get client message: %s" % c)
-                msg = c.strip()
-                if msg == 'close':
-                    client_sock.close()
-                    break
-                elif msg == 'EXIT':
-                    self.exit_event.send('EXIT')
-                else:
-                    self._on_handle_client_msg(msg)
+                unpacker.feed(chunk)
+                for unpacked_msg in unpacker:
+                    LOG.info(unpacked_msg)
+                    self._on_handle_client_msg(client_sock, unpacked_msg)
             except Exception as e:
-                LOG.debug("client sock error: %s" % str(e))
+                LOG.error("client sock error: %s" % str(e))
                 break
 
     def _on_handle_client_msg(self, msg):

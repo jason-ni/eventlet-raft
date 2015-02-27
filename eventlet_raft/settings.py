@@ -1,15 +1,34 @@
+# Settings for timing
 BUF_LEN = 1024
 VOTE_CYCLE = 0.2  # 200ms
 PING_CYCLE = 0.1  # 100ms
 ELECTION_TIMEOUT = 0.4  # 400ms
-TICK_CYCLE = 0.005  # 5ms
+TICK_CYCLE = 0.01  # 5ms
 
+# Settings for log naming
 SNAPSHOT_FILE_NAME_PREFIX = 'stm_snapshot'
 JOURNAL_PREFIX = 'eventlet_raft_journal'
 
+# Define roles
 ROLE_MEMBER = 0
 ROLE_CANDIDATE = 1
 ROLE_LEADER = 2
 
-STM_OP_SET = 0
-STM_OP_DEL = 1
+# Define message type
+MSG_TYPE_VOTE_REQ = 0
+MSG_TYPE_VOTE_RET = 1
+MSG_TYPE_LOG_ENTRY_APPEND_REQ = 2
+MSG_TYPE_LOG_ENTRY_APPEND_RET = 3
+MSG_TYPE_CLIENT_REGISTER_REQ = 4
+MSG_TYPE_CLIENT_REGISTER_RET = 5
+
+# Define operations
+STM_OP_INT = 0
+STM_OP_REG = 1
+STM_OP_SET = 2
+STM_OP_DEL = 3
+
+# Define log type
+LOG_TYPE_CLIENT_REQ = 0
+LOG_TYPE_SERVER_CMT = 1
+LOG_TYPE_SERVER_APL = 2

@@ -4,13 +4,26 @@ import eventlet
 import msgpack
 import random
 
-from .server import Server
+from .log import RaftLog
 from .msg import get_vote_msg
 from .msg import get_vote_return_msg
 from .msg import get_append_entry_msg
+from .msg import get_client_register_ret_msg
+from .msg import get_append_entry_ret_msg
+from .msg import MSG_TYPE_NAME_MAP
+
+from .server import Server
+from .settings import VOTE_CYCLE, PING_CYCLE, ELECTION_TIMEOUT, TICK_CYCLE
+# from .settings import MSG_TYPE_VOTE_REQ, MSG_TYPE_VOTE_RET
+# from .settings import MSG_TYPE_LOG_ENTRY_APPEND_REQ
+# from .settings import MSG_TYPE_LOG_ENTRY_APPEND_RET
+from .settings import MSG_TYPE_CLIENT_REGISTER_REQ
+from .settings import LOG_TYPE_CLIENT_REQ
+
+from .stm.state_machine import MemoryStateMachine
+
 
 LOG = logging.getLogger('Node')
-from .settings import VOTE_CYCLE, PING_CYCLE, ELECTION_TIMEOUT, TICK_CYCLE
 
 
 class Peer(object):
@@ -30,7 +43,6 @@ class Peer(object):
         self.match_idx = match_idx
         self.alive = alive
         self.sock = sock
-        self._msg_queue = eventlet.queue.Queue()
 
     def __str__(self):
         return str(self.id)
@@ -53,6 +65,11 @@ class Node(Server):
         self._voted = 0
         self._vote_for = None
         self._ping_counter = 0
+        self._client_req_queue = eventlet.queue.Queue()
+        self._ret_queue_map = {}
+
+        self._stm = MemoryStateMachine()
+        self._raft_log = RaftLog(progress=self._members)
 
     def _populate_members(self, conf):
         for peer_section in conf.get('server', 'peers').split(','):
@@ -91,29 +108,73 @@ class Node(Server):
     def _tick_loop(self):
         last_ping_timestamp = time.time()
         while True:
-            if self._is_follower:
-                pass
+            if self._is_leader:
+                # client requests processing
+                client_reqs = self._batch_client_req_from_queue()
+                self._process_client_reqs(client_reqs)
 
-            current_timestamp = time.time()
-            if current_timestamp - last_ping_timestamp > PING_CYCLE:
-                last_ping_timestamp = current_timestamp
-                if self._is_leader:
+                # check and update commit
+                self._raft_log.check_and_update_commit(
+                    self._term, self.majority
+                )
+
+                # Broadcast append log entry messages
+                current_timestamp = time.time()
+                if current_timestamp - last_ping_timestamp > PING_CYCLE:
+                    last_ping_timestamp = current_timestamp
                     self._broadcast_append_entry_msg()
-                    continue
 
             eventlet.sleep(TICK_CYCLE)
 
+    def _process_client_reqs(self, client_reqs):
+        for req in client_reqs:
+            LOG.info("Processing request: %s" % req)
+            log_entry = self._raft_log.build_log_entry(
+                self._term,
+                LOG_TYPE_CLIENT_REQ,
+                req['cmd'],
+            )
+            self._raft_log.append(log_entry)
+            if req['type'] == MSG_TYPE_CLIENT_REGISTER_REQ:
+                log_index = log_entry['log_index']
+                if log_index not in self._ret_queue_map:
+                    self._ret_queue_map[log_index] = req['ret_queue']
+                self._ret_queue_map[log_index].put(
+                    get_client_register_ret_msg(False, None, None)
+                )
+
+    def _batch_client_req_from_queue(self):
+        client_reqs = []
+        try:
+            client_reqs.append(self._client_req_queue.get(block=False))
+        except eventlet.queue.Empty:
+            pass
+        finally:
+            return client_reqs
+
     def _broadcast_append_entry_msg(self):
-        LOG.debug('trying to send append entry')
-        msg = get_append_entry_msg(
-            self.id,
-            self._term,
-            0,
-            0,
-            self._ping_counter,
-            None)
-        self._ping_counter += 1
-        self._broadcast_msg(msg)
+        for peer_id, peer in self._members.items():
+            LOG.debug('trying to send append entry for peer %s' % peer)
+            # TODO: Need to check if peer log is too old that we need to send
+            # snapshot to the peer.
+            if peer.next_idx <= self._raft_log.first_log_index:
+                LOG.error(
+                    "Need to send snapshot to this peer %s." % str(peer_id)
+                )
+                continue
+            need_replicate_entries, prev_log_index, prev_log_term = \
+                self._raft_log.get_need_replicate_entries_for_peer(peer)
+            msg = get_append_entry_msg(
+                self.id,
+                self._term,
+                prev_log_index,
+                prev_log_term,
+                self._ping_counter,
+                need_replicate_entries,
+                self._raft_log.commited,
+            )
+            self._ping_counter += 1
+            self._try_connect_and_send_msg(peer_id, msg)
 
     def msg_append_entry(self, msg):
         LOG.debug("++++ %s vs %s" % (self._term, msg['term']))
@@ -128,7 +189,60 @@ class Node(Server):
 
         if self._is_candidate:
             self._become_follower()
-        # TODO: process entry
+
+        if len(msg['entries']) > 0:
+            LOG.info("^^^ receive log entries:\n %s" % str(msg['entries']))
+            LOG.info("^^^ %s is follower: %s" % (self.id, self._is_follower))
+
+        # TODO: We rely on eventlet single thread peculiarity for thread safty.
+        # Log merging operations can be moved to tick loop routine. But I don't
+        # think we have problem to put it here.
+        if self._is_follower:
+            LOG.debug("prev_log_index: %s" % msg['prev_log_index'])
+            LOG.debug("prev_log_term: %s" % msg['prev_log_term'])
+            if self._raft_log.can_append(
+                msg['prev_log_index'], msg['prev_log_term']
+            ):
+                self._raft_log.trunk_append_entries(
+                    msg['prev_log_index'],
+                    msg['entries'],
+                    msg['leader_commit'],
+                )
+                append_entry_return_msg = get_append_entry_ret_msg(
+                    self.id,
+                    self._term,
+                    self._raft_log.last_log_index,
+                    True,
+                )
+            else:
+                append_entry_return_msg = get_append_entry_ret_msg(
+                    self.id,
+                    self._term,
+                    self._raft_log.last_log_index,
+                    False,
+                )
+            self._try_connect_and_send_msg(
+                msg['node_id'],
+                append_entry_return_msg,
+            )
+
+    def msg_append_entry_return(self, msg):
+        if msg['success']:
+            self._members[msg['node_id']].next_idx = msg['last_log_index'] + 1
+        else:
+            # TODO: if a follower's log is too old, all it's in memory log
+            # entries might not match with leader's. At this time, this follower
+            # should be restored from leader's snapshot.
+            LOG.info('*** msg_node_id: %s' % str(msg['node_id']))
+            LOG.info('*** msg_last_log_index: %s' % msg['last_log_index'])
+            LOG.info(
+                '*** peer next: %s' % self._members[msg['node_id']].next_idx
+            )
+            if msg['last_log_index'] < self._members[msg['node_id']].next_idx:
+                self._members[msg['node_id']].next_idx = \
+                    msg['last_log_index'] + 1
+            else:
+                self._members[msg['node_id']].next_idx -= 1
 
     def _handle_election_timeout(self):
         # sleep random time
@@ -183,7 +297,8 @@ class Node(Server):
             self._try_connect_and_send_msg(peer_id, msg)
 
     def _on_handle_node_msg(self, msg):
-        msg_name = msg['name']
+        msg['node_id'] = tuple(msg['node_id'])
+        msg_name = MSG_TYPE_NAME_MAP[msg['type']]
         if self._term < msg['term']:
             self._term = msg['term']
             self._become_follower()
@@ -229,12 +344,17 @@ class Node(Server):
                 self._become_leader()
 
     def _become_leader(self):
+        # TODO: at the beginning of a term, we should issue a blank operation
+        # that makes sure previous term log entries are commited in time.
         if self._is_candidate:
+            LOG.info('Node %s become leader.' % str(self.id))
             self._is_candidate = False
             self._is_leader = True
             self._is_follower = False
             self._last_timestamp = time.time()
-            LOG.info('Node %s become leader.' % str(self.id))
+            # reset log replication progress
+            for peer in self._members.values():
+                peer.next_idx = self._raft_log.last_log_index + 1
 
     @property
     def num_live_members(self):
@@ -255,7 +375,10 @@ class Node(Server):
                     self._members[peer_id].sock,
                     msg
                 )
-            except Exception as e:
+            except Exception as err:
+                LOG.debug(
+                    "connecting to %s error \n%s" % (str(peer_id), str(err))
+                )
                 # Try to re-establish connection
                 peer_sock = self._try_connect_to_peer(peer_id)
                 alive = False
@@ -266,7 +389,7 @@ class Node(Server):
                             peer_sock,
                             msg
                         )
-                    except Exception as err:
+                    except Exception:
                         pass
                 self._members[peer_id].alive = alive
                 self._members[peer_id].sock = peer_sock
@@ -275,22 +398,30 @@ class Node(Server):
         node_sock.send(msg)
 
     def _on_client_connect(self, client_sock, address):
-            self._clients[address] = client_sock
+        pass
 
     def _on_exit(self):
-        for sock in self._clients:
-            try:
-                sock.send('_____ exiting')
-            except Exception as e:
-                LOG.debug('error on sending exit msg to client: %s' % str(e))
+        pass
 
-    def _on_handle_client_msg(self, msg):
-        LOG.debug('notificting clients')
-        for address, sock in self._clients.items():
-            try:
-                sock.send('_____ ' + msg)
-            except Exception as e:
-                LOG.debug('error on sending exit msg to client: %s' % str(e))
+    def _on_handle_client_msg(self, client_sock, msg):
+        LOG.info('***** get client request: %s' % msg)
+        # reject if not leader
+        if not self._is_leader:
+            # TODO: return leaderHint
+            client_sock.sendall(get_client_register_ret_msg(False, None, None))
+        else:
+            if msg['type'] == MSG_TYPE_CLIENT_REGISTER_REQ:
+                self._handle_client_msg_register(client_sock, msg)
+        eventlet.sleep()
+
+    def _handle_client_msg_register(self, client_sock, msg):
+        LOG.info('***** handling client register')
+        ret_queue = eventlet.queue.Queue()
+        msg['ret_queue'] = ret_queue
+        self._client_req_queue.put(msg)
+        # wait and reply client sock
+        # TODO: handle timeout
+        client_sock.sendall(ret_queue.get())
 
 
 def main():

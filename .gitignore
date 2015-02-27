@@ -2,6 +2,7 @@
 *.log
 *.swp
 
-.ropeproject*
+.ropeproject
 
 t*.conf
+t*.log

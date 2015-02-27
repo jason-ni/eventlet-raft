@@ -43,20 +43,3 @@ class StateMachineManagerTest(RaftBaseTestCase):
         self.assertEqual(stm_manager.term, 0)
         self.assertEqual(stm_manager._role, ROLE_MEMBER)
         self.assertEqual(stm_manager.journal, None)
-
-    def test_stm_manager_resume_or_create(self):
-        journal_prefix = '~test_file_event_raft_journal'
-        snapshot_prefix = '~test_file_event_raft_snapshot'
-        stm_manager = StateMachineManager(
-            journal_prefix=journal_prefix,
-            snapshot_prefix=snapshot_prefix,
-        )
-        stm_manager.resume_or_initialize()
-        self.assertEqual(stm_manager.log_index, 0)
-        self.assertEqual(stm_manager.commit_index, 0)
-        self.assertEqual(stm_manager.term, 0)
-        self.assertEqual(stm_manager._role, ROLE_MEMBER)
-
-        stm_manager.resume_or_initialize(init=True)
-
-        stm_manager.set_stm('set', 'x', 1)
