@@ -1,5 +1,6 @@
 from cPickle import dump, load
 from glob import glob
+import logging
 import os
 
 from ..errors import StateMachineKeyDoesNotExist
@@ -7,6 +8,10 @@ from ..log import DiskJournal
 from ..settings import ROLE_MEMBER
 from ..settings import SNAPSHOT_FILE_NAME_PREFIX
 from ..settings import JOURNAL_PREFIX
+from ..settings import STM_OP_REG
+
+
+LOG = logging.getLogger('STM')
 
 
 class MemoryStateMachine(object):
@@ -32,6 +37,7 @@ class DictStateMachine(object):
     def __init__(self, snapshot_path):
         self._snapshot_path = snapshot_path
         self._stm = {}
+        self._client_seq = {}
 
     def set(self, key, value):
         self._stm[key] = value
@@ -52,6 +58,12 @@ class DictStateMachine(object):
             snap_data = load(snapshot_file)
             self._stm = snap_data['_stm']
             return snap_data
+
+    def apply_cmd(self, log_index, cmd):
+        if cmd['op'] == STM_OP_REG:
+            self._client_seq[log_index] = 0
+            LOG.info("Set client cmd sequence for client_id %s" % log_index)
+            return log_index, 0
 
 
 class StateMachineManager(object):

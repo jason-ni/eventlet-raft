@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 from .common import RaftBaseTestCase
 from ..errors import StateMachineKeyDoesNotExist
-from ..settings import ROLE_MEMBER
-from ..state_machine import DictStateMachine, StateMachineManager
+from ..state_machine import DictStateMachine
 
 
 class DictStateMachinelTest(RaftBaseTestCase):
@@ -27,19 +26,3 @@ class DictStateMachinelTest(RaftBaseTestCase):
         self.assertRaises(StateMachineKeyDoesNotExist, stm.get, 'z')
         self.assertEqual(stm.get('x'), 5)
         self.assertEqual(stm.get('y'), 6)
-
-
-class StateMachineManagerTest(RaftBaseTestCase):
-
-    def test_stm_manager_init(self):
-        journal_prefix = '~test_file_event_raft_journal'
-        snapshot_prefix = '~test_file_event_raft_snapshot'
-        stm_manager = StateMachineManager(
-            journal_prefix=journal_prefix,
-            snapshot_prefix=snapshot_prefix,
-        )
-        self.assertEqual(stm_manager.log_index, 0)
-        self.assertEqual(stm_manager.commit_index, 0)
-        self.assertEqual(stm_manager.term, 0)
-        self.assertEqual(stm_manager._role, ROLE_MEMBER)
-        self.assertEqual(stm_manager.journal, None)

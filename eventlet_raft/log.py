@@ -13,7 +13,7 @@ from .settings import LOG_TYPE_SERVER_CMT
 from .settings import LOG_TYPE_SERVER_APL
 from .settings import STM_OP_INT
 
-LOG = logging.getLogger('Node')
+LOG = logging.getLogger('Log')
 
 
 class DiskJournal(object):
@@ -96,13 +96,14 @@ class DiskJournal(object):
 
 class RaftLog(object):
 
-    def __init__(self, progress=None):
+    def __init__(self, node_id=None, progress=None):
         self.mem_log = deque()
         self.commited = 0
         self.last_applied = 0
         # TODO: need to implement recovery from journal file.
         self.mem_log.append(self._build_init_log_entry())
         self.progress = progress
+        self.node_id = node_id
 
     def _build_init_log_entry(self):
         return dict(
@@ -195,7 +196,7 @@ class RaftLog(object):
         if len(entries) > 0:
             LOG.info('new log: %s' % str(self.mem_log))
 
-    def check_and_update_commit(self, term, majority):
+    def check_and_update_commits(self, term, majority):
         for entry in reversed(self.mem_log):
             log_index = entry['log_index']
             log_term = entry['log_term']
@@ -203,11 +204,24 @@ class RaftLog(object):
                 break
             poll = 0
             for peer_id, peer in self.progress.items():
+                LOG.debug('---- peer_id %s' % str(peer_id))
+                LOG.debug('---- node_id %s' % str(self.node_id))
+                if peer_id == self.node_id:
+                    poll += 1  # We do not maintain peer info of self node.
                 if peer.next_idx > log_index:
                     poll += 1
             if poll >= majority:
                 self.commited = log_index
                 break
+
+    def get_commited_entries_for_apply(self):
+        ret = []
+        for entry in self.mem_log:
+            log_index = entry['log_index']
+            if log_index > self.last_applied and \
+                    log_index <= self.commited:
+                ret.append(entry)
+        return ret
 
     def _journal_write(self, log_entry):
         pass

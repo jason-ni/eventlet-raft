@@ -4,13 +4,8 @@ import eventlet
 import msgpack
 import random
 
+from . import msgs
 from .log import RaftLog
-from .msg import get_vote_msg
-from .msg import get_vote_return_msg
-from .msg import get_append_entry_msg
-from .msg import get_client_register_ret_msg
-from .msg import get_append_entry_ret_msg
-from .msg import MSG_TYPE_NAME_MAP
 
 from .server import Server
 from .settings import VOTE_CYCLE, PING_CYCLE, ELECTION_TIMEOUT, TICK_CYCLE
@@ -19,8 +14,8 @@ from .settings import VOTE_CYCLE, PING_CYCLE, ELECTION_TIMEOUT, TICK_CYCLE
 # from .settings import MSG_TYPE_LOG_ENTRY_APPEND_RET
 from .settings import MSG_TYPE_CLIENT_REGISTER_REQ
 from .settings import LOG_TYPE_CLIENT_REQ
-
-from .stm.state_machine import MemoryStateMachine
+from .settings import STM_OP_REG
+from .stm.state_machine import DictStateMachine
 
 
 LOG = logging.getLogger('Node')
@@ -68,8 +63,8 @@ class Node(Server):
         self._client_req_queue = eventlet.queue.Queue()
         self._ret_queue_map = {}
 
-        self._stm = MemoryStateMachine()
-        self._raft_log = RaftLog(progress=self._members)
+        self._stm = DictStateMachine('DictStateMachine.snap')
+        self._raft_log = RaftLog(node_id=self.id, progress=self._members)
 
     def _populate_members(self, conf):
         for peer_section in conf.get('server', 'peers').split(','):
@@ -114,10 +109,13 @@ class Node(Server):
                 self._process_client_reqs(client_reqs)
 
                 # check and update commit
-                self._raft_log.check_and_update_commit(
+                self._raft_log.check_and_update_commits(
                     self._term, self.majority
                 )
 
+            self._apply_commits()
+
+            if self._is_leader:
                 # Broadcast append log entry messages
                 current_timestamp = time.time()
                 if current_timestamp - last_ping_timestamp > PING_CYCLE:
@@ -125,6 +123,31 @@ class Node(Server):
                     self._broadcast_append_entry_msg()
 
             eventlet.sleep(TICK_CYCLE)
+
+    def _apply_commits(self):
+        for entry in self._raft_log.get_commited_entries_for_apply():
+            try:
+                cmd = msgpack.unpackb(entry['cmd'])
+                log_index = entry['log_index']
+                stm_ret = self._stm.apply_cmd(log_index, cmd)
+                if self._is_leader:
+                    self._reply_client(log_index, cmd, stm_ret)
+                self._raft_log.last_applied = log_index
+            except Exception:
+                LOG.exception(
+                    'Apply entry(%s) error.' % log_index,
+                )
+
+    def _reply_client(self, log_index, cmd, stm_ret):
+        ret_msg = None
+        if cmd['op'] == STM_OP_REG:
+            ret_msg = msgs.get_client_register_ret_msg(
+                True,
+                log_index,
+                None,
+            )
+        if (ret_msg is not None) and (log_index in self._ret_queue_map):
+            self._ret_queue_map[log_index].put(ret_msg)
 
     def _process_client_reqs(self, client_reqs):
         for req in client_reqs:
@@ -139,9 +162,9 @@ class Node(Server):
                 log_index = log_entry['log_index']
                 if log_index not in self._ret_queue_map:
                     self._ret_queue_map[log_index] = req['ret_queue']
-                self._ret_queue_map[log_index].put(
-                    get_client_register_ret_msg(False, None, None)
-                )
+            else:
+                # TODO: To support other commands
+                pass
 
     def _batch_client_req_from_queue(self):
         client_reqs = []
@@ -154,6 +177,8 @@ class Node(Server):
 
     def _broadcast_append_entry_msg(self):
         for peer_id, peer in self._members.items():
+            if peer_id == self.id:
+                continue
             LOG.debug('trying to send append entry for peer %s' % peer)
             # TODO: Need to check if peer log is too old that we need to send
             # snapshot to the peer.
@@ -164,7 +189,7 @@ class Node(Server):
                 continue
             need_replicate_entries, prev_log_index, prev_log_term = \
                 self._raft_log.get_need_replicate_entries_for_peer(peer)
-            msg = get_append_entry_msg(
+            msg = msgs.get_append_entry_msg(
                 self.id,
                 self._term,
                 prev_log_index,
@@ -208,14 +233,14 @@ class Node(Server):
                     msg['entries'],
                     msg['leader_commit'],
                 )
-                append_entry_return_msg = get_append_entry_ret_msg(
+                append_entry_return_msg = msgs.get_append_entry_ret_msg(
                     self.id,
                     self._term,
                     self._raft_log.last_log_index,
                     True,
                 )
             else:
-                append_entry_return_msg = get_append_entry_ret_msg(
+                append_entry_return_msg = msgs.get_append_entry_ret_msg(
                     self.id,
                     self._term,
                     self._raft_log.last_log_index,
@@ -283,7 +308,7 @@ class Node(Server):
         LOG.debug("is leader %s" % self._is_leader)
         self._term += 1
         LOG.debug('generate vote msg and broadcast.')
-        vote_msg = get_vote_msg(self.id, self._term)
+        vote_msg = msgs.get_vote_msg(self.id, self._term)
         self._voted = 1
         self._vote_for = self.id
         eventlet.spawn(self._handle_election_timeout)
@@ -298,7 +323,7 @@ class Node(Server):
 
     def _on_handle_node_msg(self, msg):
         msg['node_id'] = tuple(msg['node_id'])
-        msg_name = MSG_TYPE_NAME_MAP[msg['type']]
+        msg_name = msgs.MSG_TYPE_NAME_MAP[msg['type']]
         if self._term < msg['term']:
             self._term = msg['term']
             self._become_follower()
@@ -329,7 +354,7 @@ class Node(Server):
 
     def _return_vote_msg(self, peer_id, accept):
         LOG.debug('Return vote msg.')
-        msg = get_vote_return_msg(self.id, self._term, accept)
+        msg = msgs.get_vote_return_msg(self.id, self._term, accept)
         self._try_connect_and_send_msg(peer_id, msg)
 
     def msg_vote_return(self, msg):
@@ -408,7 +433,9 @@ class Node(Server):
         # reject if not leader
         if not self._is_leader:
             # TODO: return leaderHint
-            client_sock.sendall(get_client_register_ret_msg(False, None, None))
+            client_sock.sendall(
+                msgs.get_client_register_ret_msg(False, None, None)
+            )
         else:
             if msg['type'] == MSG_TYPE_CLIENT_REGISTER_REQ:
                 self._handle_client_msg_register(client_sock, msg)

@@ -1,8 +1,8 @@
 import eventlet
 import msgpack
 
-from .msg import get_client_register_req_msg
-from .settings import STM_OP_REG
+import cmds
+import msgs
 
 
 class RaftClient(object):
@@ -15,8 +15,8 @@ class RaftClient(object):
         self.msg_seq = 0
 
     def register(self):
-        cmd = msgpack.packb({'op': STM_OP_REG})
-        self.execute_command(get_client_register_req_msg(cmd))
+        cmd = cmds.get_client_register_cmd()
+        return self.execute_command(msgs.get_client_register_req_msg(cmd))
 
     def send_command_req(self, command):
         self._leader_sock.sendall(command)

@@ -2,7 +2,7 @@ import logging
 import sys
 
 
-LOGGERS = ['Server', 'Client', 'Node']
+LOGGERS = ['Server', 'Client', 'Node', 'Log', 'STM']
 
 
 def config_log(level=logging.DEBUG, CONF=None):
@@ -17,7 +17,9 @@ def config_log(level=logging.DEBUG, CONF=None):
         handler.setLevel(logging.INFO)
         logger.addHandler(handler)
 
-        formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(funcName)s -  %(message)s")
+        format_str = ("%(asctime)s - %(name)s - %(levelname)s"
+                      " - %(funcName)s -  %(message)s")
+        formatter = logging.Formatter(format_str)
         handler = logging.FileHandler(log_filename)
         handler.setLevel(level)
         handler.setFormatter(formatter)
