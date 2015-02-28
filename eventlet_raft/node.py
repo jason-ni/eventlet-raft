@@ -58,8 +58,9 @@ class Node(Server):
         self._term = 0
         self._voted = 0
         self._vote_for = None
-        self._client_req_queue = eventlet.queue.LightQueue()
-        self._client_read_only_req_queue = eventlet.queue.LightQueue()
+        self._current_leader_id = None
+        self._client_req_queue = None
+        self._client_read_only_req_queue = None
         self._ret_queue_map = {}
         self._last_leader_commit = 0
         self._last_leader_commit_poll = 0
@@ -264,7 +265,7 @@ class Node(Server):
         LOG.debug('follower timer is reset')
 
         if self._is_candidate:
-            self._become_follower()
+            self._become_follower(msg['node_id'])
 
         if len(msg['entries']) > 0:
             LOG.info("^^^ receive log entries:\n %s" % str(msg['entries']))
@@ -385,16 +386,17 @@ class Node(Server):
         msg_name = msgs.MSG_TYPE_NAME_MAP[msg['type']]
         if self._term < msg['term']:
             self._term = msg['term']
-            self._become_follower()
+            self._become_follower(msg['node_id'])
         method = getattr(self, 'msg_%s' % msg_name)
         method(msg)
 
-    def _become_follower(self):
+    def _become_follower(self, node_id):
         self._is_follower = True
         self._is_leader = False
         self._is_candidate = False
         self._voted = 0
         self._vote_for = None
+        self._current_leader_id = node_id
         self._last_timestamp = time.time()
 
     def msg_vote(self, msg):
@@ -435,13 +437,15 @@ class Node(Server):
         # that makes sure previous term log entries are commited in time.
         if self._is_candidate:
             LOG.info('Node %s become leader.' % str(self.id))
-            self._is_candidate = False
-            self._is_leader = True
-            self._is_follower = False
-            self._last_timestamp = time.time()
             # reset log replication progress
             for peer in self._members.values():
                 peer.next_idx = self._raft_log.last_log_index + 1
+            self._is_candidate = False
+            self._is_follower = False
+            self._last_timestamp = time.time()
+            self._client_read_only_req_queue = eventlet.queue.LightQueue()
+            self._client_req_queue = eventlet.queue.LightQueue()
+            self._is_leader = True
 
     @property
     def num_live_members(self):
@@ -494,9 +498,10 @@ class Node(Server):
         LOG.info('***** get client request: %s' % msg)
         # reject if not leader
         if not self._is_leader:
-            # TODO: return leaderHint
             client_sock.sendall(
-                msgs.get_client_register_ret_msg(False, None, None)
+                msgs.get_client_register_ret_msg(
+                    False, None, self._current_leader_id
+                )
             )
         else:
             ret_queue = None
