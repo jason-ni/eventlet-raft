@@ -362,7 +362,12 @@ class Node(Server):
         LOG.debug("is leader %s" % self._is_leader)
         self._term += 1
         LOG.debug('generate vote msg and broadcast.')
-        vote_msg = msgs.get_vote_msg(self.id, self._term)
+        vote_msg = msgs.get_vote_msg(
+            self.id,
+            self._term,
+            self._raft_log.last_log_index,
+            self._raft_log.last_log_term,
+        )
         self._voted = 1
         self._vote_for = self.id
         eventlet.spawn(self._handle_election_timeout)
@@ -400,11 +405,14 @@ class Node(Server):
         if self._term > msg['term']:
             self._return_vote_msg(
                 node_id, False)
+
         LOG.debug('node_id %s' % str(node_id))
         LOG.debug('self.id %s' % str(self.id))
-        if self._is_follower and (self._vote_for is None):
-            self._return_vote_msg(
-                node_id, True)
+        if (self._vote_for is None) and \
+                msg['last_log_index'] >= self._raft_log.last_log_index and \
+                msg['last_log_term'] >= self._raft_log.last_log_term:
+            self._vote_for = node_id
+            self._return_vote_msg(node_id, True)
 
     def _return_vote_msg(self, peer_id, accept):
         LOG.debug('Return vote msg.')

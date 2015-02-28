@@ -13,12 +13,18 @@ MSG_TYPE_NAME_MAP = {
 }
 
 
-def get_vote_msg(node_id, term):
+def get_vote_msg(node_id,
+                 term,
+                 last_log_index,
+                 last_log_term,
+                 ):
     return msgpack.packb(
         {
             'type': settings.MSG_TYPE_VOTE_REQ,
             'node_id': node_id,
-            'term': term
+            'term': term,
+            'last_log_index': last_log_index,
+            'last_log_term': last_log_term,
         }
     )
 

@@ -15,8 +15,8 @@
 
 ## Leader Election 
  
-### Make sure the candidate with latest log elected
-  - Need to add check in follower handling on vote request.
+### Make sure the candidate with the latest log elected
+  - Need to add check in follower handling on vote request. (DONE)
 
 ## Client
 
@@ -25,7 +25,8 @@
   - Reply clients in 2 places:
     1. Before we put client request into the _client_req_queue, reject it because of not leader, or the queue is full.
     2. After applied the command. 
-  - In tick loop, we reply client by put result into the per client ret_queue. 
+    (DONE)
+  - In tick loop, we reply client by put result into the per client ret_queue. (DONE)
   - If leader crushed before reply, new leader node may not have the ret_queue for this client. To solve this, the easiest way is to let client re-send the request. 
   - Command sequence counter mechanism makes sure the applied (by the previous term follower, now the new leader) command is dropped.
 
