@@ -5,6 +5,8 @@ import msgpack
 import random
 
 from . import msgs
+from . import settings
+from . import util
 from .log import RaftLog
 
 from .server import Server
@@ -12,9 +14,6 @@ from .settings import VOTE_CYCLE, PING_CYCLE, ELECTION_TIMEOUT, TICK_CYCLE
 # from .settings import MSG_TYPE_VOTE_REQ, MSG_TYPE_VOTE_RET
 # from .settings import MSG_TYPE_LOG_ENTRY_APPEND_REQ
 # from .settings import MSG_TYPE_LOG_ENTRY_APPEND_RET
-from .settings import MSG_TYPE_CLIENT_REGISTER_REQ
-from .settings import LOG_TYPE_CLIENT_REQ
-from .settings import STM_OP_REG
 from .stm.state_machine import DictStateMachine
 
 
@@ -59,9 +58,11 @@ class Node(Server):
         self._term = 0
         self._voted = 0
         self._vote_for = None
-        self._ping_counter = 0
-        self._client_req_queue = eventlet.queue.Queue()
+        self._client_req_queue = eventlet.queue.LightQueue()
+        self._client_read_only_req_queue = eventlet.queue.LightQueue()
         self._ret_queue_map = {}
+        self._last_leader_commit = 0
+        self._last_leader_commit_poll = 0
 
         self._stm = DictStateMachine('DictStateMachine.snap')
         self._raft_log = RaftLog(node_id=self.id, progress=self._members)
@@ -105,7 +106,9 @@ class Node(Server):
         while True:
             if self._is_leader:
                 # client requests processing
-                client_reqs = self._batch_client_req_from_queue()
+                client_reqs = util.batch_fetch_from_queue(
+                    self._client_req_queue,
+                )
                 self._process_client_reqs(client_reqs)
 
                 # check and update commit
@@ -116,66 +119,116 @@ class Node(Server):
             self._apply_commits()
 
             if self._is_leader:
+                # To maintain linearizability, read-only queries are
+                # accumulated until this leader confirmed its leader role.
+                if self._last_leader_commit_poll >= self.majority:
+                    self._process_read_only_client_reqs()
+
                 # Broadcast append log entry messages
                 current_timestamp = time.time()
                 if current_timestamp - last_ping_timestamp > PING_CYCLE:
+
                     last_ping_timestamp = current_timestamp
                     self._broadcast_append_entry_msg()
 
+            # TODO: Consider to wait on client/node socks event, so we need to
+            # move out the ping cycle out of tick loop. But need to think that
+            # what competition condition will be there.
             eventlet.sleep(TICK_CYCLE)
+
+    def _process_read_only_client_reqs(self):
+        for req in util.batch_fetch_from_queue(
+            self._client_read_only_req_queue
+        ):
+            LOG.info("Processing read-only request: %s" % str(req))
+            stm_ret = self._stm.apply_cmd(req)
+            msg_type = req['type']
+            self._reply_client(req['client_id'], msg_type, stm_ret)
 
     def _apply_commits(self):
         for entry in self._raft_log.get_commited_entries_for_apply():
             try:
-                cmd = msgpack.unpackb(entry['cmd'])
                 log_index = entry['log_index']
-                stm_ret = self._stm.apply_cmd(log_index, cmd)
-                if self._is_leader:
-                    self._reply_client(log_index, cmd, stm_ret)
+                log_type = entry['log_type']
+                if log_type == settings.LOG_TYPE_CLIENT_REQ or \
+                        log_type == settings.LOG_TYPE_CLIENT_REG:
+                    client_id = entry['client_id']
+                    stm_ret = self._stm.apply_cmd(entry)
+                    if self._is_leader:
+                        self._reply_client(client_id, log_type, stm_ret)
                 self._raft_log.last_applied = log_index
             except Exception:
                 LOG.exception(
                     'Apply entry(%s) error.' % log_index,
                 )
 
-    def _reply_client(self, log_index, cmd, stm_ret):
+    def _reply_client(self, client_id, req_or_log_type, stm_ret):
+        LOG.info(
+            'Replying to client %s, %s, %s' % (
+                client_id, req_or_log_type, stm_ret
+            )
+        )
         ret_msg = None
-        if cmd['op'] == STM_OP_REG:
-            ret_msg = msgs.get_client_register_ret_msg(
+        if req_or_log_type == settings.MSG_TYPE_CLIENT_QUERY_REQ or \
+                req_or_log_type == settings.LOG_TYPE_CLIENT_REQ:
+            ret_msg = msgs.get_client_update_or_query_ret_msg(
                 True,
-                log_index,
+                stm_ret,
                 None,
             )
-        if (ret_msg is not None) and (log_index in self._ret_queue_map):
-            self._ret_queue_map[log_index].put(ret_msg)
+        elif req_or_log_type == settings.LOG_TYPE_CLIENT_REG:
+            ret_msg = msgs.get_client_register_ret_msg(
+                True,
+                client_id,
+                None,
+            )
+
+        if (ret_msg is not None) and (client_id in self._ret_queue_map):
+            self._ret_queue_map[client_id].put(ret_msg)
+            # TODO: We can also introduce an unregister rpc to release the slot
+            # in _ret_queue_map. And we also need to clean outdated slots
+            # considering clients can crush without unregister. So we may need
+            # to add a session timeout concept. After session timeout, client
+            # need to re-register itself. Otherwise, servers can clean up its
+            # resources.
+        if ret_msg is None:
+            LOG.error("Did not get return data for log index %s" % client_id)
 
     def _process_client_reqs(self, client_reqs):
         for req in client_reqs:
             LOG.info("Processing request: %s" % req)
-            log_entry = self._raft_log.build_log_entry(
-                self._term,
-                LOG_TYPE_CLIENT_REQ,
-                req['cmd'],
-            )
-            self._raft_log.append(log_entry)
-            if req['type'] == MSG_TYPE_CLIENT_REGISTER_REQ:
-                log_index = log_entry['log_index']
-                if log_index not in self._ret_queue_map:
-                    self._ret_queue_map[log_index] = req['ret_queue']
-            else:
-                # TODO: To support other commands
-                pass
+            log_entry = None
+            if req['type'] == settings.MSG_TYPE_CLIENT_QUERY_REQ:
+                # TODO: Add size limit of the queue, and handle queue full.
+                self._client_read_only_req_queue.put(req)
+                continue
+            elif req['type'] == settings.MSG_TYPE_CLIENT_UPDATE_REQ:
+                log_entry = self._raft_log.build_log_entry(
+                    self._term,
+                    settings.LOG_TYPE_CLIENT_REQ,
+                    req['cmd'],
+                    client_id=req['client_id'],
+                    seq=req['seq'],
+                )
+            elif req['type'] == settings.MSG_TYPE_CLIENT_REGISTER_REQ:
+                log_entry = self._raft_log.build_log_entry(
+                    self._term,
+                    settings.LOG_TYPE_CLIENT_REG,
+                    req['cmd'],
+                )
+                # Client id is the log index of the register request.
+                log_entry['client_id'] = log_entry['log_index']
+                if req['type'] == settings.MSG_TYPE_CLIENT_REGISTER_REQ:
+                    log_index = log_entry['log_index']
+                    if log_index not in self._ret_queue_map:
+                        self._ret_queue_map[log_index] = req['ret_queue']
 
-    def _batch_client_req_from_queue(self):
-        client_reqs = []
-        try:
-            client_reqs.append(self._client_req_queue.get(block=False))
-        except eventlet.queue.Empty:
-            pass
-        finally:
-            return client_reqs
+            if log_entry is not None:
+                self._raft_log.append(log_entry)
 
     def _broadcast_append_entry_msg(self):
+        self._last_leader_commit = self._raft_log.commited
+        self._last_leader_commit_poll = 1
         for peer_id, peer in self._members.items():
             if peer_id == self.id:
                 continue
@@ -194,11 +247,9 @@ class Node(Server):
                 self._term,
                 prev_log_index,
                 prev_log_term,
-                self._ping_counter,
                 need_replicate_entries,
-                self._raft_log.commited,
+                self._last_leader_commit,
             )
-            self._ping_counter += 1
             self._try_connect_and_send_msg(peer_id, msg)
 
     def msg_append_entry(self, msg):
@@ -217,7 +268,6 @@ class Node(Server):
 
         if len(msg['entries']) > 0:
             LOG.info("^^^ receive log entries:\n %s" % str(msg['entries']))
-            LOG.info("^^^ %s is follower: %s" % (self.id, self._is_follower))
 
         # TODO: We rely on eventlet single thread peculiarity for thread safty.
         # Log merging operations can be moved to tick loop routine. But I don't
@@ -238,6 +288,7 @@ class Node(Server):
                     self._term,
                     self._raft_log.last_log_index,
                     True,
+                    msg['leader_commit'],
                 )
             else:
                 append_entry_return_msg = msgs.get_append_entry_ret_msg(
@@ -245,6 +296,7 @@ class Node(Server):
                     self._term,
                     self._raft_log.last_log_index,
                     False,
+                    msg['leader_commit'],
                 )
             self._try_connect_and_send_msg(
                 msg['node_id'],
@@ -252,6 +304,8 @@ class Node(Server):
             )
 
     def msg_append_entry_return(self, msg):
+        if msg['leader_commit'] == self._last_leader_commit:
+            self._last_leader_commit_poll += 1
         if msg['success']:
             self._members[msg['node_id']].next_idx = msg['last_log_index'] + 1
         else:
@@ -437,18 +491,26 @@ class Node(Server):
                 msgs.get_client_register_ret_msg(False, None, None)
             )
         else:
-            if msg['type'] == MSG_TYPE_CLIENT_REGISTER_REQ:
-                self._handle_client_msg_register(client_sock, msg)
-        eventlet.sleep()
+            ret_queue = None
+            if msg['type'] == settings.MSG_TYPE_CLIENT_REGISTER_REQ:
+                LOG.info('***** handling client register')
+                ret_queue = eventlet.queue.LightQueue()
+                msg['ret_queue'] = ret_queue
 
-    def _handle_client_msg_register(self, client_sock, msg):
-        LOG.info('***** handling client register')
-        ret_queue = eventlet.queue.Queue()
-        msg['ret_queue'] = ret_queue
-        self._client_req_queue.put(msg)
-        # wait and reply client sock
-        # TODO: handle timeout
-        client_sock.sendall(ret_queue.get())
+            elif msg['type'] == settings.MSG_TYPE_CLIENT_UPDATE_REQ or \
+                    msg['type'] == settings.MSG_TYPE_CLIENT_QUERY_REQ:
+                LOG.info('***** handling client update or query request')
+                client_id = msg['client_id']
+                if client_id not in self._ret_queue_map:
+                    self._ret_queue_map[client_id] = eventlet.queue.LightQueue()
+                ret_queue = self._ret_queue_map[client_id]
+
+            # TODO: handle queue full
+            self._client_req_queue.put(msg)
+
+            # TODO: handle timeout
+            client_sock.sendall(ret_queue.get())
+        eventlet.sleep()
 
 
 def main():

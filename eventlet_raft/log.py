@@ -6,12 +6,9 @@ import os
 from os import path
 from struct import pack, unpack
 
+from . import settings
 from .errors import DiskJournalFileDoesNotExist
 from .errors import DiskJournalFileCrushed
-from .settings import LOG_TYPE_CLIENT_REQ
-from .settings import LOG_TYPE_SERVER_CMT
-from .settings import LOG_TYPE_SERVER_APL
-from .settings import STM_OP_INT
 
 LOG = logging.getLogger('Log')
 
@@ -109,15 +106,24 @@ class RaftLog(object):
         return dict(
             log_index=0,
             log_term=0,
-            log_type=LOG_TYPE_SERVER_CMT,
-            cmd=msgpack.packb(dict(op=STM_OP_INT)),
+            log_type=settings.LOG_TYPE_SERVER_CMT,
+            cmd=msgpack.packb(dict(op=settings.STM_OP_INT)),
         )
 
-    def build_log_entry(self, log_term, log_type, cmd, log_index=0):
+    def build_log_entry(self,
+                        log_term,
+                        log_type,
+                        cmd,
+                        log_index=0,
+                        client_id=None,
+                        seq=None,
+                        ):
         return dict(
             log_index=self.last_log_index + 1,
             log_term=log_term,
             log_type=log_type,
+            client_id=client_id,
+            seq=seq,
             cmd=cmd,
         )
 
@@ -127,19 +133,21 @@ class RaftLog(object):
                 'log_index': <index of this log entry>,
                 'log_term': <term of this log entry>,
                 'log_type': <type of this log entry>,
-                'command': <command that will be applied to statemachine>,
+                'client_id': <client_id of this log entry>,
+                'seq': <commend sequence number>,
+                'cmd': <command that will be applied to statemachine>,
             }
             The 'command' field is encoded in msgpack format.
         """
         LOG.info('****** get log entry: %s' % log_entry)
         self._journal_write(log_entry)
-        if log_entry['log_type'] == LOG_TYPE_CLIENT_REQ:
+        log_type = log_entry['log_type']
+        if log_type == settings.LOG_TYPE_CLIENT_REQ or \
+                log_type == settings.LOG_TYPE_CLIENT_REG:
             self.mem_log.append(log_entry)
             LOG.info("****** mem log \n%s" % self.mem_log)
-        if log_entry['log_type'] == LOG_TYPE_SERVER_CMT:
+        if log_type == settings.LOG_TYPE_SERVER_CMT:
             self.commited = log_entry['log_index']
-        if log_entry['log_type'] == LOG_TYPE_SERVER_APL:
-            self.last_applied = log_entry['log_index']
 
     @property
     def first_log_index(self):

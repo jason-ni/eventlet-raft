@@ -13,6 +13,11 @@
      - WAL journal is monotonic increasing. The trunking of conflict mem_log should write WAL journal record to mark deletion of trunked log records.
      - Raft role change should write journal to persistent node role and term information. 
 
+## Leader Election 
+ 
+### Make sure the candidate with latest log elected
+  - Need to add check in follower handling on vote request.
+
 ## Client
 
 ### Client register. 
@@ -24,11 +29,23 @@
   - If leader crushed before reply, new leader node may not have the ret_queue for this client. To solve this, the easiest way is to let client re-send the request. 
   - Command sequence counter mechanism makes sure the applied (by the previous term follower, now the new leader) command is dropped.
 
+### Client Session
+  - Add a session mechanism to client. The register command creates a client session. The client session has a idle timeout. After timeout, Raft nodes can recycle the resource allocated to this client.
+
+### Client Update Request
+
+
 ### Client Query
+
+  - Linearizability of read.
+    - See https://aphyr.com/posts/316-call-me-maybe-etcd-and-consul and https://github.com/coreos/etcd/issues/741 
+    - Accumulate read reqs before the leader node make sure it get the qurom, that means to wait for a cycle of heartbeat. 
+    - Leader -> Follower change should clear accumulated read reqs. It can return error to client with leader hint.
 
 ### Leader Hint
   - Each member should know the leader id of current term.
   - Return leader hint if the node is not leader.
+
 
 ## State Machine
 
@@ -44,3 +61,6 @@
   - Remove old enought log entry from left end.
   - Add index to log entry position to support more efficient access of mem_log.
 
+## Message packaging efficiency
+
+  - Refactor message fields to use int not string.

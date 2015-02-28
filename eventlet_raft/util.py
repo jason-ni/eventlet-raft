@@ -1,6 +1,8 @@
+import eventlet
 import logging
 import sys
 
+from . import settings
 
 LOGGERS = ['Server', 'Client', 'Node', 'Log', 'STM']
 
@@ -30,3 +32,14 @@ def config_log(level=logging.DEBUG, CONF=None):
         LOGGERS,
         [level] * NUM_LOGGERS,
         [log_filename] * NUM_LOGGERS)
+
+
+def batch_fetch_from_queue(queue):
+    elements = []
+    try:
+        for i in range(settings.MAX_BATCH_ITEMS):
+            elements.append(queue.get(block=False))
+    except eventlet.queue.Empty:
+        pass
+    finally:
+        return elements

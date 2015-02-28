@@ -1,6 +1,22 @@
 from msgpack import packb
 
-from .settings import STM_OP_REG
+from . import settings
+
 
 def get_client_register_cmd():
-    return packb({'op': STM_OP_REG})
+    return packb({'op': settings.STM_OP_REG})
+
+
+def get_client_update_cmd(key, value):
+    return packb({
+        'op': settings.STM_OP_SET,
+        'key': key,
+        'value': value,
+    })
+
+
+def get_client_query_cmd(key):
+    return packb({
+        'op': settings.STM_OP_GET,
+        'key': key,
+    })

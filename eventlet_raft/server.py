@@ -55,7 +55,7 @@ class Server(object):
                     LOG.info(unpacked_msg)
                     self._on_handle_client_msg(client_sock, unpacked_msg)
             except Exception as e:
-                LOG.error("client sock error: %s" % str(e))
+                LOG.exception("client sock error: %s" % str(e))
                 break
 
     def _on_handle_client_msg(self, msg):
