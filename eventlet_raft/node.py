@@ -252,6 +252,8 @@ class Node(Server):
                 self._last_leader_commit,
             )
             self._try_connect_and_send_msg(peer_id, msg)
+            if peer.next_idx <= self._raft_log.last_log_index:
+                peer.next_idx += 1
 
     def msg_append_entry(self, msg):
         LOG.debug("++++ %s vs %s" % (self._term, msg['term']))
@@ -308,7 +310,10 @@ class Node(Server):
         if msg['leader_commit'] == self._last_leader_commit:
             self._last_leader_commit_poll += 1
         if msg['success']:
-            self._members[msg['node_id']].next_idx = msg['last_log_index'] + 1
+            peer = self._members[msg['node_id']]
+            peer.match_idx = msg['last_log_index']
+            if peer.match_idx >= peer.next_idx:
+                peer.next_idx = peer.match_idx + 1
         else:
             # TODO: if a follower's log is too old, all it's in memory log
             # entries might not match with leader's. At this time, this follower
@@ -440,6 +445,7 @@ class Node(Server):
             # reset log replication progress
             for peer in self._members.values():
                 peer.next_idx = self._raft_log.last_log_index + 1
+                peer.match_idx = 0
             self._is_candidate = False
             self._is_follower = False
             self._last_timestamp = time.time()

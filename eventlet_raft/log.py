@@ -216,7 +216,7 @@ class RaftLog(object):
                 LOG.debug('---- node_id %s' % str(self.node_id))
                 if peer_id == self.node_id:
                     poll += 1  # We do not maintain peer info of self node.
-                if peer.next_idx > log_index:
+                if peer.match_idx >= log_index:
                     poll += 1
             if poll >= majority:
                 self.commited = log_index
