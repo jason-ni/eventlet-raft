@@ -329,6 +329,16 @@ class Node(Server):
             else:
                 self._members[msg['node_id']].next_idx -= 1
 
+    def msg_term_init(self, msg):
+        self._raft_log.append(
+            self._raft_log.build_log_entry(
+                self._term,
+                settings.LOG_TYPE_SERVER_CMT,
+                msg['cmd'],
+                client_id=msg['node_id'],
+            )
+        )
+
     def _handle_election_timeout(self):
         # sleep random time
         sleep_time = random.choice([
@@ -438,8 +448,6 @@ class Node(Server):
                 self._become_leader()
 
     def _become_leader(self):
-        # TODO: at the beginning of a term, we should issue a blank operation
-        # that makes sure previous term log entries are commited in time.
         if self._is_candidate:
             LOG.info('Node %s become leader.' % str(self.id))
             # reset log replication progress
@@ -452,6 +460,7 @@ class Node(Server):
             self._client_read_only_req_queue = eventlet.queue.LightQueue()
             self._client_req_queue = eventlet.queue.LightQueue()
             self._is_leader = True
+            self._broadcast_msg(msgs.get_term_init_msg(self.id, self._term))
 
     @property
     def num_live_members(self):

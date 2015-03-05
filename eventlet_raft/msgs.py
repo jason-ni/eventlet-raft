@@ -10,6 +10,7 @@ MSG_TYPE_NAME_MAP = {
     settings.MSG_TYPE_LOG_ENTRY_APPEND_RET: 'append_entry_return',
     settings.MSG_TYPE_CLIENT_REGISTER_REQ: 'client_register',
     settings.MSG_TYPE_CLIENT_REGISTER_RET: 'client_register_return',
+    settings.MSG_TYPE_TERM_INIT: 'term_init',
 }
 
 
@@ -137,5 +138,18 @@ def get_client_query_req_msg(client_id,
             'type': settings.MSG_TYPE_CLIENT_QUERY_REQ,
             'client_id': client_id,
             'cmd': command,
+        }
+    )
+
+
+def get_term_init_msg(node_id,
+                      term,
+                      ):
+    return msgpack.packb(
+        {
+            'type': settings.MSG_TYPE_TERM_INIT,
+            'node_id': node_id,
+            'term': term,
+            'cmd': msgpack.packb(dict(op=settings.STM_OP_INT))
         }
     )
