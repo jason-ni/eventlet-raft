@@ -1,14 +1,17 @@
-import sys
 from datetime import datetime
 from eventlet_raft.client import RaftClient
 
-port = int(sys.argv[1])
+server_address_list = [
+    ('127.0.0.1', 4000),
+    ('127.0.0.1', 4001),
+    ('127.0.0.1', 4002),
+]
 
-client = RaftClient(('127.0.0.1', port))
+client = RaftClient(server_address_list)
 print client.register()
 
 before = datetime.now()
-for i in range(4000):
-    client.get_value('name')
+for i in range(200):
+    client.set_value('name', 'jason' + str(i))
 print before
 print datetime.now() - before
