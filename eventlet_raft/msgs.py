@@ -140,16 +140,3 @@ def get_client_query_req_msg(client_id,
             'cmd': command,
         }
     )
-
-
-def get_term_init_msg(node_id,
-                      term,
-                      ):
-    return msgpack.packb(
-        {
-            'type': settings.MSG_TYPE_TERM_INIT,
-            'node_id': node_id,
-            'term': term,
-            'cmd': msgpack.packb(dict(op=settings.STM_OP_INT))
-        }
-    )

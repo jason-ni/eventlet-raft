@@ -241,14 +241,14 @@ class Node(Server):
                     "Need to send snapshot to this peer %s." % str(peer_id)
                 )
                 continue
-            need_replicate_entries, prev_log_index, prev_log_term = \
-                self._raft_log.get_need_replicate_entries_for_peer(peer)
+            entries_for_replication, prev_log_index, prev_log_term = \
+                self._raft_log.get_entries_for_replication(peer)
             msg = msgs.get_append_entry_msg(
                 self.id,
                 self._term,
                 prev_log_index,
                 prev_log_term,
-                need_replicate_entries,
+                entries_for_replication,
                 self._last_leader_commit,
             )
             self._try_connect_and_send_msg(peer_id, msg)
@@ -272,20 +272,19 @@ class Node(Server):
         if len(msg['entries']) > 0:
             LOG.info("^^^ receive log entries:\n %s" % str(msg['entries']))
 
-        # TODO: We rely on eventlet single thread peculiarity for thread safty.
-        # Log merging operations can be moved to tick loop routine. But I don't
-        # think we have problem to put it here.
         if self._is_follower:
             LOG.debug("prev_log_index: %s" % msg['prev_log_index'])
             LOG.debug("prev_log_term: %s" % msg['prev_log_term'])
-            if self._raft_log.can_append(
-                msg['prev_log_index'], msg['prev_log_term']
-            ):
-                self._raft_log.trunk_append_entries(
-                    msg['prev_log_index'],
-                    msg['entries'],
-                    msg['leader_commit'],
-                )
+            LOG.debug("current log: %s" % str(
+                [(x['log_index'], x['log_term'])
+                 for x in self._raft_log.mem_log]
+            ))
+            success = self._raft_log.append_entries_to_follower(
+                msg['prev_log_index'],
+                msg['prev_log_term'],
+                msg['entries'],
+            )
+            if success:
                 append_entry_return_msg = msgs.get_append_entry_ret_msg(
                     self.id,
                     self._term,
@@ -460,7 +459,14 @@ class Node(Server):
             self._client_read_only_req_queue = eventlet.queue.LightQueue()
             self._client_req_queue = eventlet.queue.LightQueue()
             self._is_leader = True
-            self._broadcast_msg(msgs.get_term_init_msg(self.id, self._term))
+            self._raft_log.append(
+                self._raft_log.build_log_entry(
+                    self._term,
+                    settings.LOG_TYPE_SERVER_CMT,
+                    msgpack.packb(dict(op=settings.STM_OP_INT)),
+                    client_id=self.id,
+                )
+            )
 
     @property
     def num_live_members(self):

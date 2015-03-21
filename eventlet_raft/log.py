@@ -1,5 +1,6 @@
 from collections import deque
 from glob import glob
+import itertools
 import logging
 import msgpack
 import os
@@ -141,13 +142,9 @@ class RaftLog(object):
         """
         LOG.info('****** get log entry: %s' % log_entry)
         self._journal_write(log_entry)
-        log_type = log_entry['log_type']
-        if log_type == settings.LOG_TYPE_CLIENT_REQ or \
-                log_type == settings.LOG_TYPE_CLIENT_REG:
-            self.mem_log.append(log_entry)
-            LOG.info("****** mem log \n%s" % self.mem_log)
-        if log_type == settings.LOG_TYPE_SERVER_CMT:
-            self.commited = log_entry['log_index']
+        self.mem_log.append(log_entry)
+        LOG.info("****** mem log \n%s" % self.mem_log)
+        return log_entry
 
     @property
     def first_log_index(self):
@@ -161,8 +158,8 @@ class RaftLog(object):
     def last_log_term(self):
         return self.mem_log[-1]['log_term']
 
-    def get_need_replicate_entries_for_peer(self, peer):
-        need_replicate_entries = []
+    def get_entries_for_replication(self, peer):
+        entries_for_replication = []
         LOG.debug("last_log_index %s" % self.last_log_index)
         prev_index = self.last_log_index
         prev_term = self.last_log_term
@@ -181,28 +178,51 @@ class RaftLog(object):
                     prev_index = entry['log_index']
                     prev_term = entry['log_term']
                     break
-            need_replicate_entries = list(tmp_deque)
-        return need_replicate_entries, prev_index, prev_term
+            entries_for_replication = list(tmp_deque)
+        return entries_for_replication, prev_index, prev_term
 
-    def can_append(self, prev_index, prev_term):
-        follower_can_append = False
-        for entry in reversed(self.mem_log):
+    def append_entries_to_follower(self, prev_index, prev_term, append_entries):
+        prev_matched = False
+        for idx, entry in enumerate(reversed(self.mem_log)):
             if entry['log_index'] == prev_index and \
                     entry['log_term'] == prev_term:
-                follower_can_append = True
+                prev_matched = True
                 break
-        return follower_can_append
+        if not prev_matched:
+            LOG.debug('has conflict')
+            return False
 
-    def trunk_append_entries(self, last_match, entries, leader_commit):
-        self.commited = leader_commit
-        for idx, entry in enumerate(reversed(self.mem_log)):
-            if entry['log_index'] == last_match:
-                break
-        for i in range(idx):
-            self.mem_log.pop()
-        self.mem_log.extend(entries)
-        if len(entries) > 0:
-            LOG.info('new log: %s' % str(self.mem_log))
+        append_entries_len = len(append_entries)
+        if append_entries_len > 0:
+            mem_log_len = len(self.mem_log)
+            match_start = mem_log_len - idx
+            LOG.debug('log match_start: %d' % match_start)
+
+            match_cnt = 0
+            for idx, entry in enumerate(
+                itertools.islice(self.mem_log, match_start, mem_log_len)
+            ):
+                if idx == append_entries_len:
+                    break
+                if entry != append_entries[idx]:
+                    break
+                match_cnt += 1
+
+            conflict_start = match_start + match_cnt
+            if conflict_start < mem_log_len:
+                for i in range(mem_log_len - conflict_start):
+                    cancelled_log_entry = self.mem_log.pop()
+                    LOG.debug(
+                        'pop conflict log entry: %s' % str(cancelled_log_entry)
+                    )
+            if match_cnt < append_entries_len:
+                self.mem_log.extend(append_entries[match_cnt:])
+
+            # for debug
+            for entry in self.mem_log:
+                LOG.info("---- %s" % str(entry))
+
+        return True
 
     def check_and_update_commits(self, term, majority):
         for entry in reversed(self.mem_log):
