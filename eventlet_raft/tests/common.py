@@ -7,8 +7,7 @@ from ..node import Peer
 
 class RaftBaseTestCase(TestCase):
 
-    @classmethod
-    def tearDownClass(cls):
+    def tearDown(self):
         map(os.remove, glob('./~test_file*'))
 
 

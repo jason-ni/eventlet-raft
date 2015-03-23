@@ -1,5 +1,7 @@
-# Settings for timing
+# Settings for size
 BUF_LEN = 1024
+JOURNAL_CUT_LIMIT = (1024 ** 2) * 64  # 64MB
+# Settings for timing
 VOTE_CYCLE = 0.5  # 200ms
 PING_CYCLE = 0.05  # 100ms
 ELECTION_TIMEOUT = 0.5  # 400ms
@@ -41,6 +43,8 @@ STM_OP_GET = 104
 LOG_TYPE_CLIENT_REG = 200
 LOG_TYPE_CLIENT_REQ = 201
 LOG_TYPE_SERVER_CMT = 202
+LOG_TYPE_CANCEL_IDX = 203
+LOG_TYPE_COMMIT_CHG = 204
 
 # Define stm response code
 STM_RET_CODE_OK = 500

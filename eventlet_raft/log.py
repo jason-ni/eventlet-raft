@@ -5,96 +5,101 @@ import logging
 import msgpack
 import os
 from os import path
-from struct import pack, unpack
 
 from . import settings
-from .errors import DiskJournalFileDoesNotExist
-from .errors import DiskJournalFileCrushed
+# from .errors import DiskJournalFileCrushed
 
 LOG = logging.getLogger('Log')
 
 
 class DiskJournal(object):
 
-    def __init__(self, journal_path):
-        if not path.exists(journal_path):
-            raise DiskJournalFileDoesNotExist(file_path=journal_path)
-        self._journal_path = journal_path
-        self._mem_log = deque()
-        self._load_journal()
+    def __init__(self,
+                 journal_prefix,
+                 work_dir=os.getcwd(),
+                 cut_limit=settings.JOURNAL_CUT_LIMIT,
+                 ):
+        self.journal_prefix = journal_prefix
+        self.work_dir = work_dir
 
-    @classmethod
-    def create(cls, journal_prefix, work_dir=os.getcwd()):
-        journal_path = path.join(work_dir, journal_prefix + '.0')
-        with open(journal_path, 'w+b'):
-            pass
-        return cls(journal_path)
+        self.journal_path = self.get_or_create_latest_journal_path()
+        self.journal_file = None
+        self.last_log_index = None
+        self.cut_limit = cut_limit
+        self._need_flush = False
 
-    @classmethod
-    def get_latest_journal_path(cls, journal_prefix, work_dir):
+    def get_or_create_latest_journal_path(self):
+        journal_path_list = self.get_journal_path_list()
+        if journal_path_list:
+            return journal_path_list[-1]
+        else:
+            journal_path = path.join(self.work_dir, self.journal_prefix + '.0')
+            with open(journal_path, 'w+b'):
+                pass
+            return journal_path
+
+    def get_journal_path_list(self):
         journal_path_list = glob(path.join(
-            work_dir,
-            journal_prefix + '*',
+            self.work_dir,
+            self.journal_prefix + '*',
         ))
-        if len(journal_path_list) == 0:
-            return None
         return sorted(
             journal_path_list,
             cmp=lambda x, y: cmp(int(x.split('.')[-1]), int(y.split('.')[-1]))
-        )[-1]
+        )
 
-    @classmethod
-    def resume(cls, journal_prefix, work_dir=None):
-        if work_dir is None:
-            work_dir = os.getcwd()
-        return cls(cls.get_latest_journal_path(
-            journal_prefix,
-            work_dir,
-        ))
-
-    def _load_journal(self):
-        self._journal_file = open(self._journal_path, 'r+b')
-        entry_size_raw = self._journal_file.read(8)
-        if 0 < len(entry_size_raw) < 8:
-            raise DiskJournalFileCrushed(
-                reason='first entry length not 0 but < 8'
-            )
-        while entry_size_raw:
-            entry_size = unpack('L', entry_size_raw)[0]
-            content_raw = self._journal_file.read(entry_size)
-            if len(content_raw) != entry_size:
-                raise DiskJournalFileCrushed(
-                    reason='log entry size does not match'
-                )
-            log_index, log_term, log_value = unpack(
-                '2L{0}s'.format(entry_size - 16),
-                content_raw,
-            )
-            self._mem_log.append((log_index, log_term, log_value))
-            entry_size_raw = self._journal_file.read(8)
+    def browse_journal(self):
+        for journal_path in self.get_journal_path_list():
+            with open(journal_path, 'r+b') as journal_file:
+                unpacker = msgpack.Unpacker()
+                while True:
+                    chunk = journal_file.read(settings.BUF_LEN)
+                    if len(chunk) == 0:
+                        break
+                    unpacker.feed(chunk)
+                    for element in unpacker:
+                        yield element
 
     def append(self, entry):
-        """ param: entry - (index, term, value)"""
-        log_index, log_term, log_value = entry
-        log_value_len = len(log_value)
-        self._journal_file.write(
-            pack(
-                '3L{0}s'.format(log_value_len),
-                log_value_len + 16,
-                log_index,
-                log_term,
-                log_value,
-            )
+        """ param: entry - dict type log entry"""
+        if self.journal_file is None:
+            self.journal_file = open(self.journal_path, 'a+b')
+        self.journal_file.write(msgpack.packb(entry))
+        self._need_flush = True
+        self.last_log_index = entry['log_index']
+
+    def flush(self):
+        if self._need_flush and self.journal_file:
+            self.journal_file.flush()
+            journal_info = os.stat(self.journal_path)
+            if journal_info.st_size > self.cut_limit:
+                self.cut()
+
+    def cut(self):
+        if self.journal_file is None:
+            return
+        old_journal_path = self.journal_path
+        destaged_journal_path = "{0}.{1}".format(
+            self.journal_path, self.last_log_index
         )
-        self._journal_file.flush()
+        self.journal_file.close()
+        self.journal_path = path.join(
+            self.work_dir,
+            "{0}.{1}".format(self.journal_prefix, self.last_log_index + 1),
+        )
+        self.journal_file = open(self.journal_path, 'a+b')
+        os.rename(old_journal_path, destaged_journal_path)
 
     def close(self):
-        self._journal_file.close()
+        if self.journal_file:
+            self.flush()
+            self.journal_file.close()
+            self.journal_file = None
 
 
 class RaftLog(object):
 
-    def __init__(self, node_id=None, progress=None):
+    def __init__(self, node_id=None, progress=None, disk_journal=None):
         self.mem_log = deque()
         self.commited = 0
         self.last_applied = 0
@@ -102,6 +107,19 @@ class RaftLog(object):
         self.mem_log.append(self._build_init_log_entry())
         self.progress = progress
         self.node_id = node_id
+        self.disk_journal = disk_journal
+
+    @property
+    def first_log_index(self):
+        return self.mem_log[0]['log_index']
+
+    @property
+    def last_log_index(self):
+        return self.mem_log[-1]['log_index']
+
+    @property
+    def last_log_term(self):
+        return self.mem_log[-1]['log_term']
 
     def _build_init_log_entry(self):
         return dict(
@@ -109,6 +127,13 @@ class RaftLog(object):
             log_term=0,
             log_type=settings.LOG_TYPE_SERVER_CMT,
             cmd=msgpack.packb(dict(op=settings.STM_OP_INT)),
+        )
+
+    def _build_cancel_log_entry(self, log_index, log_term):
+        return dict(
+            log_index=log_index,
+            log_term=log_term,
+            log_type=settings.LOG_TYPE_CANCEL_IDX,
         )
 
     def build_log_entry(self,
@@ -141,22 +166,14 @@ class RaftLog(object):
             The 'command' field is encoded in msgpack format.
         """
         LOG.info('****** get log entry: %s' % log_entry)
-        self._journal_write(log_entry)
+        self.disk_journal.append(log_entry)
         self.mem_log.append(log_entry)
         LOG.info("****** mem log \n%s" % self.mem_log)
         return log_entry
 
-    @property
-    def first_log_index(self):
-        return self.mem_log[0]['log_index']
-
-    @property
-    def last_log_index(self):
-        return self.mem_log[-1]['log_index']
-
-    @property
-    def last_log_term(self):
-        return self.mem_log[-1]['log_term']
+    def recover_from_disk_journal(self):
+        for entry in self.disk_journal.browse_journal():
+            pass
 
     def get_entries_for_replication(self, peer):
         entries_for_replication = []
@@ -212,10 +229,18 @@ class RaftLog(object):
             if conflict_start < mem_log_len:
                 for i in range(mem_log_len - conflict_start):
                     cancelled_log_entry = self.mem_log.pop()
+                    self.disk_journal.append(
+                        self._build_cancel_log_entry(
+                            cancelled_log_entry['log_index'],
+                            cancelled_log_entry['log_term'],
+                        )
+                    )
                     LOG.debug(
                         'pop conflict log entry: %s' % str(cancelled_log_entry)
                     )
             if match_cnt < append_entries_len:
+                for entry in append_entries[match_cnt:]:
+                    self.disk_journal.append(entry)
                 self.mem_log.extend(append_entries[match_cnt:])
 
             # for debug
@@ -224,7 +249,15 @@ class RaftLog(object):
 
         return True
 
+    def write_commit_log(self, commit_to_log_index, term):
+        self.disk_journal.append(dict(
+            log_index=commit_to_log_index,
+            log_term=term,
+            log_type=settings.LOG_TYPE_COMMIT_CHG,
+        ))
+
     def check_and_update_commits(self, term, majority):
+        old_commited = self.commited
         for entry in reversed(self.mem_log):
             log_index = entry['log_index']
             log_term = entry['log_term']
@@ -241,6 +274,8 @@ class RaftLog(object):
             if poll >= majority:
                 self.commited = log_index
                 break
+        if old_commited < self.commited:
+            self.write_commit_log(self.commited, term)
 
     def get_commited_entries_for_apply(self):
         ret = []
@@ -250,6 +285,3 @@ class RaftLog(object):
                     log_index <= self.commited:
                 ret.append(entry)
         return ret
-
-    def _journal_write(self, log_entry):
-        pass

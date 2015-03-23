@@ -7,13 +7,10 @@ import random
 from . import msgs
 from . import settings
 from . import util
-from .log import RaftLog
+from .log import DiskJournal, RaftLog
 
 from .server import Server
 from .settings import VOTE_CYCLE, PING_CYCLE, ELECTION_TIMEOUT, TICK_CYCLE
-# from .settings import MSG_TYPE_VOTE_REQ, MSG_TYPE_VOTE_RET
-# from .settings import MSG_TYPE_LOG_ENTRY_APPEND_REQ
-# from .settings import MSG_TYPE_LOG_ENTRY_APPEND_RET
 from .stm.state_machine import DictStateMachine
 
 
@@ -66,7 +63,14 @@ class Node(Server):
         self._last_leader_commit_poll = 0
 
         self._stm = DictStateMachine('DictStateMachine.snap')
-        self._raft_log = RaftLog(node_id=self.id, progress=self._members)
+        self._disk_journal = DiskJournal(
+            conf.get('server', 'journal_prefix'),
+        )
+        self._raft_log = RaftLog(
+            node_id=self.id,
+            progress=self._members,
+            disk_journal=self._disk_journal,
+        )
 
     def _populate_members(self, conf):
         for peer_section in conf.get('server', 'peers').split(','):
@@ -116,6 +120,8 @@ class Node(Server):
                 self._raft_log.check_and_update_commits(
                     self._term, self.majority
                 )
+
+                self._disk_journal.flush()
 
             self._apply_commits()
 
@@ -285,6 +291,16 @@ class Node(Server):
                 msg['entries'],
             )
             if success:
+                if self._raft_log.commited < msg['leader_commit']:
+                    self._raft_log.write_commit_log(
+                        msg['leader_commit'],
+                        self._term,
+                    )
+                    self._raft_log.commited = msg['leader_commit']
+
+                if self._raft_log.commited < msg['leader_commit'] or \
+                        len(msg['entries']) > 0:
+                    self._disk_journal.flush()
                 append_entry_return_msg = msgs.get_append_entry_ret_msg(
                     self.id,
                     self._term,
