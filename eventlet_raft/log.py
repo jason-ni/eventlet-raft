@@ -71,6 +71,7 @@ class DiskJournal(object):
     def flush(self):
         if self._need_flush and self.journal_file:
             self.journal_file.flush()
+            self._need_flush = False
             journal_info = os.stat(self.journal_path)
             if journal_info.st_size > self.cut_limit:
                 self.cut()
@@ -103,23 +104,45 @@ class RaftLog(object):
         self.mem_log = deque()
         self.commited = 0
         self.last_applied = 0
+        self.last_log_index = 0
+        self.last_log_term = 0
         # TODO: need to implement recovery from journal file.
         self.mem_log.append(self._build_init_log_entry())
         self.progress = progress
         self.node_id = node_id
         self.disk_journal = disk_journal
 
+    def populate_mem_log_and_apply_stm(self, stm):
+        for entry in self.disk_journal.browse_journal():
+            log_type = entry['log_type']
+            if log_type == settings.LOG_TYPE_CLIENT_REG or \
+                    log_type == settings.LOG_TYPE_CLIENT_REQ or \
+                    log_type == settings.LOG_TYPE_SERVER_CMT:
+                self.mem_log.append(entry)
+                self.last_log_term = entry['term']
+                self.last_log_index = entry['log_index']
+            elif log_type == settings.LOG_TYPE_COMMIT_CHG:
+                self.commited = entry['log_index']
+                self._apply_recovered_cmd_to_stm(stm)
+            elif log_type == settings.LOG_TYPE_CANCEL_IDX:
+                self.mem_log.pop()
+                self.last_log_index = self.mem_log[-1]['log_index']
+                self.last_log_term = self.mem_log[-1]['log_term']
+
+    def _apply_recovered_cmd_to_stm(self, stm):
+        for entry in self.mem_log:
+            log_index = entry['log_index']
+            if log_index > self.last_applied and \
+                    log_index <= self.commited:
+                log_type = entry['log_type']
+                if log_type == settings.LOG_TYPE_CLIENT_REG or \
+                        log_type == settings.LOG_TYPE_CLIENT_REQ:
+                    stm.apply_cmd(entry)
+                    self.last_applied = log_index
+
     @property
     def first_log_index(self):
         return self.mem_log[0]['log_index']
-
-    @property
-    def last_log_index(self):
-        return self.mem_log[-1]['log_index']
-
-    @property
-    def last_log_term(self):
-        return self.mem_log[-1]['log_term']
 
     def _build_init_log_entry(self):
         return dict(
@@ -168,12 +191,10 @@ class RaftLog(object):
         LOG.info('****** get log entry: %s' % log_entry)
         self.disk_journal.append(log_entry)
         self.mem_log.append(log_entry)
+        self.last_log_index = log_entry['log_index']
+        self.last_log_term = log_entry['log_term']
         LOG.info("****** mem log \n%s" % self.mem_log)
         return log_entry
-
-    def recover_from_disk_journal(self):
-        for entry in self.disk_journal.browse_journal():
-            pass
 
     def get_entries_for_replication(self, peer):
         entries_for_replication = []
@@ -242,10 +263,9 @@ class RaftLog(object):
                 for entry in append_entries[match_cnt:]:
                     self.disk_journal.append(entry)
                 self.mem_log.extend(append_entries[match_cnt:])
-
-            # for debug
-            for entry in self.mem_log:
-                LOG.info("---- %s" % str(entry))
+            if match_cnt <= append_entries_len:
+                self.last_log_index = append_entries[-1]['log_index']
+                self.last_log_term = append_entries[-1]['log_term']
 
         return True
 

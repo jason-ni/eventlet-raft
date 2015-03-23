@@ -11,7 +11,7 @@ client = RaftClient(server_address_list)
 print client.register()
 
 before = datetime.now()
-for i in range(200):
-    client.set_value('name', 'jason' + str(i))
+for i in range(2000):
+    print client.get_value('name')
 print before
 print datetime.now() - before

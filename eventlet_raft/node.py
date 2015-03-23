@@ -120,7 +120,6 @@ class Node(Server):
                 self._raft_log.check_and_update_commits(
                     self._term, self.majority
                 )
-
                 self._disk_journal.flush()
 
             self._apply_commits()
@@ -483,6 +482,7 @@ class Node(Server):
                     client_id=self.id,
                 )
             )
+            self._disk_journal.flush()
 
     @property
     def num_live_members(self):

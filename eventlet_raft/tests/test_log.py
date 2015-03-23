@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-from glob import glob
 import msgpack
 import os
 from os import path
@@ -54,6 +53,7 @@ class DiskJournalTest(RaftBaseTestCase):
         self.assertTrue(path.exists(current_journal_path))
         file_info = os.stat(current_journal_path)
         self.assertTrue(file_info.st_size > 0)
+
 
 def _fake_client_reg_log_entry(raft_log, term):
     return raft_log.build_log_entry(
@@ -212,6 +212,7 @@ class RaftLogTest(RaftBaseTestCase):
             [entry['log_index'] for entry in follower_log.mem_log],
             [0, 1, 2, 3, 4, 7, 8, 9],
         )
+        self.assertEqual(follower_log.last_log_index, 9)
 
     def test_append_entiries_to_follower_case_2(self):
         """
@@ -228,6 +229,7 @@ class RaftLogTest(RaftBaseTestCase):
             3, 0, leader_append_entries,
         )
         self.assertTrue(success is False)
+        self.assertEqual(follower_log.last_log_index, 2)
 
     def test_append_entiries_to_follower_case_3(self):
         """
@@ -250,6 +252,7 @@ class RaftLogTest(RaftBaseTestCase):
             [entry['log_index'] for entry in follower_log.mem_log],
             [0, 1, 2, 3, 4, 7, 8],
         )
+        self.assertEqual(follower_log.last_log_index, 8)
 
     def test_append_entiries_to_follower_case_4(self):
         """
@@ -272,6 +275,7 @@ class RaftLogTest(RaftBaseTestCase):
             [entry['log_index'] for entry in follower_log.mem_log],
             [0, 1, 2, 3, 5],
         )
+        self.assertEqual(follower_log.last_log_index, 5)
 
     def test_append_entiries_to_follower_case_5(self):
         """
@@ -293,6 +297,7 @@ class RaftLogTest(RaftBaseTestCase):
             [entry['log_index'] for entry in follower_log.mem_log],
             [0, 1, 2, 3, 4, 5],
         )
+        self.assertEqual(follower_log.last_log_index, 5)
 
     def test_append_entiries_to_follower_case_6(self):
         """
@@ -314,3 +319,4 @@ class RaftLogTest(RaftBaseTestCase):
             [entry['log_index'] for entry in follower_log.mem_log],
             [0, 1, 2, 3, 4, 5, 6],
         )
+        self.assertEqual(follower_log.last_log_index, 6)
