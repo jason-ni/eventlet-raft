@@ -62,7 +62,7 @@ class Node(Server):
         self._last_leader_commit = 0
         self._last_leader_commit_poll = 0
 
-        self._stm = DictStateMachine('DictStateMachine.snap')
+        self._stm = DictStateMachine()
         self._disk_journal = DiskJournal(
             conf.get('server', 'journal_prefix'),
         )
@@ -71,6 +71,7 @@ class Node(Server):
             progress=self._members,
             disk_journal=self._disk_journal,
         )
+        self._raft_log.recover_or_init(self._stm)
 
     def _populate_members(self, conf):
         for peer_section in conf.get('server', 'peers').split(','):

@@ -48,6 +48,16 @@ class DiskJournal(object):
             cmp=lambda x, y: cmp(int(x.split('.')[-1]), int(y.split('.')[-1]))
         )
 
+    def is_blank(self):
+        journal_path_list = self.get_journal_path_list()
+        if journal_path_list:
+            if os.stat(journal_path_list[-1]).st_size == 0:
+                return True
+            else:
+                return False
+        else:
+            return True
+
     def browse_journal(self):
         for journal_path in self.get_journal_path_list():
             with open(journal_path, 'r+b') as journal_file:
@@ -72,8 +82,7 @@ class DiskJournal(object):
         if self._need_flush and self.journal_file:
             self.journal_file.flush()
             self._need_flush = False
-            journal_info = os.stat(self.journal_path)
-            if journal_info.st_size > self.cut_limit:
+            if os.stat(self.journal_path).st_size > self.cut_limit:
                 self.cut()
 
     def cut(self):
@@ -106,11 +115,15 @@ class RaftLog(object):
         self.last_applied = 0
         self.last_log_index = 0
         self.last_log_term = 0
-        # TODO: need to implement recovery from journal file.
-        self.mem_log.append(self._build_init_log_entry())
         self.progress = progress
         self.node_id = node_id
         self.disk_journal = disk_journal
+
+    def recover_or_init(self, stm):
+        if self.disk_journal.is_blank():
+            self.append(self._build_init_log_entry())
+        else:
+            self.populate_mem_log_and_apply_stm(stm)
 
     def populate_mem_log_and_apply_stm(self, stm):
         for entry in self.disk_journal.browse_journal():
@@ -119,7 +132,7 @@ class RaftLog(object):
                     log_type == settings.LOG_TYPE_CLIENT_REQ or \
                     log_type == settings.LOG_TYPE_SERVER_CMT:
                 self.mem_log.append(entry)
-                self.last_log_term = entry['term']
+                self.last_log_term = entry['log_term']
                 self.last_log_index = entry['log_index']
             elif log_type == settings.LOG_TYPE_COMMIT_CHG:
                 self.commited = entry['log_index']

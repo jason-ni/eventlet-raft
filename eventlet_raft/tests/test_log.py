@@ -8,6 +8,7 @@ from .common import fake_populate_members
 from .common import FAKE_NODE_IP_PREFIX, FAKE_NODE_PORT
 from ..log import DiskJournal
 from ..log import RaftLog
+from ..stm.state_machine import DictStateMachine
 from .. import cmds
 from .. import settings
 
@@ -56,11 +57,13 @@ class DiskJournalTest(RaftBaseTestCase):
 
 
 def _fake_client_reg_log_entry(raft_log, term):
-    return raft_log.build_log_entry(
+    log_entry = raft_log.build_log_entry(
         term,
         settings.LOG_TYPE_CLIENT_REG,
         cmds.get_client_register_cmd(),
     )
+    log_entry['client_id'] = log_entry['log_index']
+    return log_entry
 
 
 def _fake_server_commit_log_entry(raft_log,
@@ -137,7 +140,7 @@ class RaftLogTest(RaftBaseTestCase):
             progress=self.members,
             disk_journal=self.disk_journal,
         )
-        self.assertEquals(len(raft_log.mem_log), 1)
+        self.assertEquals(len(raft_log.mem_log), 0)
 
     def test_append_log_entry(self):
         raft_log = RaftLog(
@@ -147,7 +150,7 @@ class RaftLogTest(RaftBaseTestCase):
         )
         current_term = 3
         raft_log.append(_fake_client_reg_log_entry(raft_log, current_term))
-        self.assertEquals(len(raft_log.mem_log), 2)
+        self.assertEquals(len(raft_log.mem_log), 1)
         new_term = 4
         raft_log.append(
             _fake_server_commit_log_entry(
@@ -210,7 +213,7 @@ class RaftLogTest(RaftBaseTestCase):
         self.assertTrue(success)
         self.assertEquals(
             [entry['log_index'] for entry in follower_log.mem_log],
-            [0, 1, 2, 3, 4, 7, 8, 9],
+            [1, 2, 3, 4, 7, 8, 9],
         )
         self.assertEqual(follower_log.last_log_index, 9)
 
@@ -250,7 +253,7 @@ class RaftLogTest(RaftBaseTestCase):
         self.assertTrue(success)
         self.assertEquals(
             [entry['log_index'] for entry in follower_log.mem_log],
-            [0, 1, 2, 3, 4, 7, 8],
+            [1, 2, 3, 4, 7, 8],
         )
         self.assertEqual(follower_log.last_log_index, 8)
 
@@ -273,7 +276,7 @@ class RaftLogTest(RaftBaseTestCase):
         self.assertTrue(success)
         self.assertEquals(
             [entry['log_index'] for entry in follower_log.mem_log],
-            [0, 1, 2, 3, 5],
+            [1, 2, 3, 5],
         )
         self.assertEqual(follower_log.last_log_index, 5)
 
@@ -295,7 +298,7 @@ class RaftLogTest(RaftBaseTestCase):
         self.assertTrue(success)
         self.assertEquals(
             [entry['log_index'] for entry in follower_log.mem_log],
-            [0, 1, 2, 3, 4, 5],
+            [1, 2, 3, 4, 5],
         )
         self.assertEqual(follower_log.last_log_index, 5)
 
@@ -317,6 +320,55 @@ class RaftLogTest(RaftBaseTestCase):
         self.assertTrue(success)
         self.assertEquals(
             [entry['log_index'] for entry in follower_log.mem_log],
-            [0, 1, 2, 3, 4, 5, 6],
+            [1, 2, 3, 4, 5, 6],
         )
         self.assertEqual(follower_log.last_log_index, 6)
+
+    def test_recover_or_init(self):
+        raft_log = RaftLog(
+            node_id=self.current_node_id,
+            progress=self.members,
+            disk_journal=self.disk_journal,
+        )
+        stm = DictStateMachine()
+        raft_log.recover_or_init(stm)
+        self.assertEqual(len(raft_log.mem_log), 1)
+        self.assertTrue(path.exists(raft_log.disk_journal.journal_path))
+        raft_log.disk_journal.flush()
+        self.assertTrue(
+            os.stat(raft_log.disk_journal.journal_path).st_size > 0
+        )
+
+        raft_log.append(_fake_client_reg_log_entry(raft_log, 1))
+        raft_log.append(_fake_client_update_log_entry(
+            raft_log,
+            1,
+            1,
+            1,
+            'index',
+            2,
+        ))
+        raft_log.append(_fake_client_update_log_entry(
+            raft_log,
+            1,
+            1,
+            2,
+            'index',
+            3,
+        ))
+        raft_log.append(raft_log._build_cancel_log_entry(3, 1))
+        raft_log.write_commit_log(2, 1)
+        raft_log.disk_journal.close()
+
+        raft_log = RaftLog(
+            node_id=self.current_node_id,
+            progress=self.members,
+            disk_journal=self.disk_journal,
+        )
+        stm = DictStateMachine()
+        raft_log.recover_or_init(stm)
+        self.assertEqual(len(raft_log.mem_log), 3)
+        self.assertEqual(raft_log.last_log_index, 2)
+        self.assertEqual(raft_log.last_log_term, 1)
+        self.assertEqual(stm.get('index'), 2)
+        self.assertEqual(stm._client_seq[1], 1)
