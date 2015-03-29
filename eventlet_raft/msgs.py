@@ -91,14 +91,14 @@ def get_client_register_req_msg(cmd):
 
 
 def get_client_register_ret_msg(success,
-                                client_id,
+                                response,
                                 leader_hint,
                                 ):
     return msgpack.packb(
         {
             'type': settings.MSG_TYPE_CLIENT_REGISTER_RET,
             'success': success,
-            'client_id': client_id,
+            'resp': response,
             'leader_hint': leader_hint,
         }
     )
@@ -133,12 +133,14 @@ def get_client_update_or_query_ret_msg(success,
 
 
 def get_client_query_req_msg(client_id,
+                             sequence_num,
                              command,
                              ):
     return msgpack.packb(
         {
             'type': settings.MSG_TYPE_CLIENT_QUERY_REQ,
             'client_id': client_id,
+            'seq': sequence_num,
             'cmd': command,
         }
     )

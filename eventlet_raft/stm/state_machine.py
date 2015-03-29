@@ -46,9 +46,17 @@ class DictStateMachine(object):
         cmd = msgpack.unpackb(log_entry['cmd'])
         if cmd['op'] == settings.STM_OP_GET:
             try:
-                return settings.STM_RET_CODE_OK, self._stm[cmd['key']]
+                return (
+                    settings.STM_RET_CODE_OK,
+                    self._stm[cmd['key']],
+                    log_entry['seq'],
+                )
             except KeyError:
-                return settings.STM_RET_CODE_ERROR_EXT_KEY_ERROR, None
+                return (
+                    settings.STM_RET_CODE_ERROR_EXT_KEY_ERROR,
+                    None,
+                    log_entry['seq'],
+                )
         elif cmd['op'] == settings.STM_OP_SET:
             if self._client_seq[client_id] >= log_entry['seq']:
                 LOG.info(
@@ -61,8 +69,16 @@ class DictStateMachine(object):
                 )
                 self._stm[cmd['key']] = cmd['value']
                 self._client_seq[client_id] = log_entry['seq']
-            return settings.STM_RET_CODE_OK, cmd['value']
+            return (
+                settings.STM_RET_CODE_OK,
+                cmd['value'],
+                log_entry['seq'],
+            )
         elif cmd['op'] == settings.STM_OP_REG:
             self._client_seq[client_id] = 0
             LOG.info("Set client cmd sequence for client_id %s" % client_id)
-            return client_id, 0
+            return (
+                settings.STM_RET_CODE_OK,
+                client_id,
+                0,
+            )

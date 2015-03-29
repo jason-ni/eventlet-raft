@@ -124,9 +124,8 @@ class Node(Server):
                 )
                 self._disk_journal.flush()
 
-            self._apply_commits()
+                self._apply_commits()
 
-            if self._is_leader:
                 # To maintain linearizability, read-only queries are
                 # accumulated until this leader confirmed its leader role.
                 if self._last_leader_commit_poll >= self.majority:
@@ -163,9 +162,11 @@ class Node(Server):
                         log_type == settings.LOG_TYPE_CLIENT_REG:
                     client_id = entry['client_id']
                     stm_ret = self._stm.apply_cmd(entry)
+                    self._raft_log.last_applied = log_index
                     if self._is_leader:
                         self._reply_client(client_id, log_type, stm_ret)
-                self._raft_log.last_applied = log_index
+                else:
+                    self._raft_log.last_applied = log_index
             except Exception:
                 LOG.exception(
                     'Apply entry(%s) error.' % log_index,
@@ -200,7 +201,7 @@ class Node(Server):
         elif req_or_log_type == settings.LOG_TYPE_CLIENT_REG:
             ret_msg = msgs.get_client_register_ret_msg(
                 True,
-                client_id,
+                stm_ret,
                 None,
             )
 
@@ -328,6 +329,8 @@ class Node(Server):
                         self._raft_log.commited,
                         self._term,
                     )
+
+                    self._apply_commits()
 
                 self._disk_journal.flush()
                 append_entry_return_msg = msgs.get_append_entry_ret_msg(

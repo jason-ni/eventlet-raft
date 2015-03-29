@@ -193,7 +193,7 @@ class RaftLog(object):
                         cmd,
                         log_index=0,
                         client_id=None,
-                        seq=None,
+                        seq=0,
                         ):
         return dict(
             log_index=self.last_log_index + 1,
