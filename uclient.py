@@ -15,14 +15,14 @@ def write_log(log, data, msg):
         str(data),
     ))
 
-
 client = RaftClient(server_address_list)
 print client.register()
 
-with open('tclient.log', 'w') as log:
+with open('uclient.log', 'w') as log:
     for i in range(2000):
-        write_log(log, client.set_value('name', 'Jason %s' % i),
-                  'set_value({0})'.format(i))
-        write_log(log, client.get_value('name'),
-                  'get_value({0})'.format(i)
+        write_log(log, client.set_value('age', '%s' % i),
+                  "set value({0})".format(i),
+                  )
+        write_log(log, client.get_value('age'),
+                  "get value({0})".format(i),
                   )

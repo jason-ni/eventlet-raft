@@ -61,7 +61,7 @@ class DictStateMachine(object):
                 )
                 self._stm[cmd['key']] = cmd['value']
                 self._client_seq[client_id] = log_entry['seq']
-            return settings.STM_RET_CODE_OK, None
+            return settings.STM_RET_CODE_OK, cmd['value']
         elif cmd['op'] == settings.STM_OP_REG:
             self._client_seq[client_id] = 0
             LOG.info("Set client cmd sequence for client_id %s" % client_id)

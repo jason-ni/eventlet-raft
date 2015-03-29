@@ -3,6 +3,7 @@ import time
 import eventlet
 import msgpack
 import random
+import sys
 
 from . import msgs
 from . import settings
@@ -153,6 +154,7 @@ class Node(Server):
             self._reply_client(req['client_id'], msg_type, stm_ret)
 
     def _apply_commits(self):
+        old_applied = self._raft_log.last_applied
         for entry in self._raft_log.get_commited_entries_for_apply():
             try:
                 log_index = entry['log_index']
@@ -168,6 +170,18 @@ class Node(Server):
                 LOG.exception(
                     'Apply entry(%s) error.' % log_index,
                 )
+        if old_applied != self._raft_log.last_applied:
+            if self._is_leader:
+                self._raft_log.destage_fully_replicated_log()
+            else:
+                self._raft_log.remove_destaged_log()
+            LOG.info("==== node {0}, destaged_index {1}".format(
+                self.id,
+                self._raft_log.destaged_index,
+            ))
+            LOG.info("^^^^ destaged log:{0}".format(
+                self._to_index_term_array(self._raft_log.mem_log)
+            ))
 
     def _reply_client(self, client_id, req_or_log_type, stm_ret):
         LOG.info(
@@ -236,17 +250,11 @@ class Node(Server):
     def _broadcast_append_entry_msg(self):
         self._last_leader_commit = self._raft_log.commited
         self._last_leader_commit_poll = 1
+        msg_list = []
         for peer_id, peer in self._members.items():
             if peer_id == self.id:
                 continue
             LOG.debug('trying to send append entry for peer %s' % peer)
-            # TODO: Need to check if peer log is too old that we need to send
-            # snapshot to the peer.
-            if peer.next_idx <= self._raft_log.first_log_index:
-                LOG.error(
-                    "Need to send snapshot to this peer %s." % str(peer_id)
-                )
-                continue
             entries_for_replication, prev_log_index, prev_log_term = \
                 self._raft_log.get_entries_for_replication(peer)
             msg = msgs.get_append_entry_msg(
@@ -256,10 +264,14 @@ class Node(Server):
                 prev_log_term,
                 entries_for_replication,
                 self._last_leader_commit,
+                self._raft_log.destaged_index,
             )
+            msg_list.append((peer_id, msg))
+        for peer_id, msg in msg_list:
             self._try_connect_and_send_msg(peer_id, msg)
-            if peer.next_idx <= self._raft_log.last_log_index:
-                peer.next_idx += 1
+
+    def _to_index_term_array(self, log_list):
+        return [(entry['log_index'], entry['log_term']) for entry in log_list]
 
     def msg_append_entry(self, msg):
         LOG.debug("++++ %s vs %s" % (self._term, msg['term']))
@@ -276,7 +288,24 @@ class Node(Server):
             self._become_follower(msg['node_id'])
 
         if len(msg['entries']) > 0:
-            LOG.info("^^^ receive log entries:\n %s" % str(msg['entries']))
+            LOG.info("^^^ last index {0}, last term {1}".format(
+                self._raft_log.last_log_index,
+                self._raft_log.last_log_term,
+            ))
+            LOG.info("^^^ msg last index {0}, last term {1}".format(
+                msg['prev_log_index'],
+                msg['prev_log_term'],
+            ))
+            LOG.info("^^^from {0} destaged_index {1}".format(
+                msg['node_id'],
+                msg['destaged_index'],
+            ))
+            LOG.info("^^^ receive log entries:\n {0}".format(
+                str(self._to_index_term_array(msg['entries']))
+            ))
+            LOG.info("^^^ mem_log:\n {0}".format(
+                str(self._to_index_term_array(self._raft_log.mem_log))
+            ))
 
         if self._is_follower:
             LOG.debug("prev_log_index: %s" % msg['prev_log_index'])
@@ -291,16 +320,16 @@ class Node(Server):
                 msg['entries'],
             )
             if success:
-                if self._raft_log.commited < msg['leader_commit']:
+                if self._raft_log.destaged_index < msg['destaged_index'] or \
+                        self._raft_log.commited < msg['leader_commit']:
+                    self._raft_log.destaged_index = msg['destaged_index']
+                    self._raft_log.commited = msg['leader_commit']
                     self._raft_log.write_commit_log(
-                        msg['leader_commit'],
+                        self._raft_log.commited,
                         self._term,
                     )
-                    self._raft_log.commited = msg['leader_commit']
 
-                if self._raft_log.commited < msg['leader_commit'] or \
-                        len(msg['entries']) > 0:
-                    self._disk_journal.flush()
+                self._disk_journal.flush()
                 append_entry_return_msg = msgs.get_append_entry_ret_msg(
                     self.id,
                     self._term,
@@ -338,11 +367,20 @@ class Node(Server):
             LOG.info(
                 '*** peer next: %s' % self._members[msg['node_id']].next_idx
             )
-            if msg['last_log_index'] < self._members[msg['node_id']].next_idx:
-                self._members[msg['node_id']].next_idx = \
-                    msg['last_log_index'] + 1
+            #if msg['last_log_index'] < self._members[msg['node_id']].next_idx:
+            #    self._members[msg['node_id']].next_idx = \
+            #        msg['last_log_index'] + 1
+            #else:
+            #    self._members[msg['node_id']].next_idx -= 1
+            if msg['last_log_index'] < self._raft_log.destaged_index:
+                LOG.error('Need snapshot. Not implemented yet. Existing...')
+                sys.exit()
             else:
-                self._members[msg['node_id']].next_idx -= 1
+                peer = self._members[msg['node_id']]
+                if peer.next_idx > msg['last_log_index']:
+                    peer.next_idx = msg['last_log_index']
+                else:
+                    peer.next_idx -= 1
 
     def msg_term_init(self, msg):
         self._raft_log.append(
@@ -468,7 +506,7 @@ class Node(Server):
             # reset log replication progress
             for peer in self._members.values():
                 peer.next_idx = self._raft_log.last_log_index + 1
-                peer.match_idx = 0
+                peer.match_idx = self._raft_log.destaged_index
             self._is_candidate = False
             self._is_follower = False
             self._last_timestamp = time.time()

@@ -47,6 +47,7 @@ def get_append_entry_msg(node_id,
                          prev_log_term,
                          entries,
                          leader_commit,
+                         destaged_index,
                          ):
     return msgpack.packb(
         {
@@ -57,6 +58,7 @@ def get_append_entry_msg(node_id,
             'prev_log_term': prev_log_term,
             'entries': entries,
             'leader_commit': leader_commit,
+            'destaged_index': destaged_index,
         }
     )
 

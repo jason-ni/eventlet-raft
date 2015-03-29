@@ -66,6 +66,10 @@ def _fake_client_reg_log_entry(raft_log, term):
     return log_entry
 
 
+def _get_log_index_array(log_entry_list):
+    return [entry['log_index'] for entry in log_entry_list]
+
+
 def _fake_server_commit_log_entry(raft_log,
                                   node_id,
                                   term,
@@ -161,38 +165,6 @@ class RaftLogTest(RaftBaseTestCase):
         )
         self.assertEqual(raft_log.last_log_term, new_term)
         self.assertEqual(raft_log.last_log_index, 2)
-
-    def test_get_entries_for_replication(self):
-        raft_log = RaftLog(
-            node_id=self.current_node_id,
-            progress=self.members,
-            disk_journal=self.disk_journal,
-        )
-        current_term = 3
-        raft_log.append(
-            _fake_server_commit_log_entry(
-                raft_log,
-                self.current_node_id,
-                current_term,
-            )
-        )
-        entry = raft_log.append(
-            _fake_client_reg_log_entry(raft_log, current_term)
-        )
-        client_id = entry['log_index']
-        for i in range(5):
-            raft_log.append(
-                _fake_client_update_log_entry(
-                    raft_log, current_term, client_id, i, 'counter', i
-                )
-            )
-        peer = self.members.values()[-1]
-        peer.next_idx = raft_log.last_log_index - 4
-        entries_for_replication, prev_index, prev_term = \
-            raft_log.get_entries_for_replication(peer)
-        self.assertEqual(prev_index, 2)
-        self.assertEqual(prev_term, 3)
-        self.assertEqual(len(entries_for_replication), 5)
 
     def test_append_entiries_to_follower_case_1(self):
         """
@@ -372,3 +344,131 @@ class RaftLogTest(RaftBaseTestCase):
         self.assertEqual(raft_log.last_log_term, 1)
         self.assertEqual(stm.get('index'), 2)
         self.assertEqual(stm._client_seq[1], 1)
+
+
+class LeaderAndFollowerRaftLogTest(RaftBaseTestCase):
+
+    current_term = 3
+
+    def _gen_raft_log(self, ip_sub_no):
+        members = fake_populate_members(member_count=5)
+        node_id = (FAKE_NODE_IP_PREFIX + str(ip_sub_no), FAKE_NODE_PORT)
+        journal_prefix = '~test_file_event_raft_journal_node_{0}'.format(
+            ip_sub_no,
+        )
+        return RaftLog(
+            node_id=node_id,
+            progress=members,
+            disk_journal=DiskJournal(journal_prefix)
+        )
+
+    def _prepare_leader_raft_log(self):
+        leader_raft_log = self._gen_raft_log(0)
+        leader_raft_log.append(
+            _fake_server_commit_log_entry(
+                leader_raft_log,
+                leader_raft_log.node_id,
+                self.current_term,
+            )
+        )
+        entry = leader_raft_log.append(
+            _fake_client_reg_log_entry(leader_raft_log, self.current_term)
+        )
+        client_id = entry['log_index']
+        for i in range(5):
+            leader_raft_log.append(
+                _fake_client_update_log_entry(
+                    leader_raft_log,
+                    self.current_term,
+                    client_id,
+                    i,
+                    'counter',
+                    i
+                )
+            )
+        return leader_raft_log
+
+    def test_replicate_log_to_follower(self):
+        leader_raft_log = self._prepare_leader_raft_log()
+        follower_raft_log = self._gen_raft_log(1)
+
+        peer = leader_raft_log.progress[follower_raft_log.node_id]
+        peer.next_idx = leader_raft_log.last_log_index - 4
+
+        entries_for_replication, prev_index, prev_term = \
+            leader_raft_log.get_entries_for_replication(peer)
+        self.assertEquals(
+            _get_log_index_array(entries_for_replication),
+            [3, 4, 5, 6, 7],
+        )
+        self.assertEqual(prev_index, 2)
+        self.assertEqual(prev_term, 3)
+
+        follower_raft_log.mem_log.extend(
+            [x for x in leader_raft_log.mem_log][:2]
+        )
+        follower_raft_log.last_log_index = \
+            follower_raft_log.mem_log[-1]['log_index']
+        follower_raft_log.last_log_term = \
+            follower_raft_log.mem_log[-1]['log_term']
+        success = follower_raft_log.append_entries_to_follower(
+            prev_index,
+            prev_term,
+            entries_for_replication,
+        )
+        self.assertTrue(success)
+        self.assertEquals(
+            follower_raft_log.mem_log,
+            leader_raft_log.mem_log,
+        )
+
+    def test_check_and_update_commit_then_get_entries_for_apply(self):
+        leader_raft_log = self._prepare_leader_raft_log()
+        follower_1_raft_log = self._gen_raft_log(1)
+        follower_2_raft_log = self._gen_raft_log(2)
+        self.assertEqual(leader_raft_log.commited, 0)
+        follower_1_peer = leader_raft_log.progress[follower_1_raft_log.node_id]
+        follower_2_peer = leader_raft_log.progress[follower_2_raft_log.node_id]
+        follower_1_peer.match_idx = 3
+        follower_2_peer.match_idx = 4
+        majority = len(leader_raft_log.progress) / 2 + 1
+        leader_raft_log.check_and_update_commits(3, majority)
+        self.assertEqual(leader_raft_log.commited, 3)
+
+        leader_raft_log.last_applied = 2
+        entries_for_apply = leader_raft_log.get_commited_entries_for_apply()
+        self.assertEquals(
+            _get_log_index_array(entries_for_apply),
+            [3, ],
+        )
+
+    def test_destage_fully_replicated_log(self):
+        leader_raft_log = self._prepare_leader_raft_log()
+        follower_peers = [leader_raft_log.progress[x]
+                          for x in sorted(leader_raft_log.progress.keys())]
+        for peer in follower_peers:
+            peer.match_idx = 4
+
+        follower_peers[-1].match_idx = 2
+
+        majority = len(leader_raft_log.progress) / 2 + 1
+        leader_raft_log.check_and_update_commits(3, majority)
+        leader_raft_log.last_applied = 3
+
+        leader_raft_log.destage_fully_replicated_log()
+        self.assertEquals(
+            _get_log_index_array(leader_raft_log.mem_log),
+            [2, 3, 4, 5, 6, 7],
+        )
+        leader_raft_log.destage_fully_replicated_log()
+        self.assertEquals(
+            _get_log_index_array(leader_raft_log.mem_log),
+            [2, 3, 4, 5, 6, 7],
+        )
+        follower_peers[-1].match_idx = 4
+        leader_raft_log.last_applied = 4
+        leader_raft_log.destage_fully_replicated_log()
+        self.assertEquals(
+            _get_log_index_array(leader_raft_log.mem_log),
+            [4, 5, 6, 7],
+        )

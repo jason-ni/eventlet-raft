@@ -115,6 +115,8 @@ class RaftLog(object):
         self.last_applied = 0
         self.last_log_index = 0
         self.last_log_term = 0
+        self.destaged_index = 0
+        self.destaged_term = 0
         self.progress = progress
         self.node_id = node_id
         self.disk_journal = disk_journal
@@ -136,11 +138,20 @@ class RaftLog(object):
                 self.last_log_index = entry['log_index']
             elif log_type == settings.LOG_TYPE_COMMIT_CHG:
                 self.commited = entry['log_index']
+                self.destaged_index = entry['destaged_index']
                 self._apply_recovered_cmd_to_stm(stm)
+                self.remove_destaged_log()
             elif log_type == settings.LOG_TYPE_CANCEL_IDX:
                 self.mem_log.pop()
                 self.last_log_index = self.mem_log[-1]['log_index']
                 self.last_log_term = self.mem_log[-1]['log_term']
+        for peer in self.progress.values():
+            peer.match_idx = self.destaged_index
+
+        LOG.info("===== last log index: {0}".format(self.last_log_index))
+        LOG.info("===== last log term: {0}".format(self.last_log_term))
+        LOG.info("===== destaged_index: {0}".format(self.destaged_index))
+        LOG.info("===== last_applied: {0}".format(self.last_applied))
 
     def _apply_recovered_cmd_to_stm(self, stm):
         for entry in self.mem_log:
@@ -156,6 +167,10 @@ class RaftLog(object):
     @property
     def first_log_index(self):
         return self.mem_log[0]['log_index']
+
+    @property
+    def first_log_term(self):
+        return self.mem_log[0]['log_term']
 
     def _build_init_log_entry(self):
         return dict(
@@ -212,11 +227,14 @@ class RaftLog(object):
     def get_entries_for_replication(self, peer):
         entries_for_replication = []
         LOG.debug("last_log_index %s" % self.last_log_index)
-        prev_index = self.last_log_index
-        prev_term = self.last_log_term
         if peer.next_idx <= self.last_log_index:
+            prev_index = self.destaged_index
+            prev_term = self.destaged_term
             # Most of the time, the peer.next_idx is near if not equal the
             # mem_log end. So we'd better fetch new log entries from the end.
+            LOG.info("^^^^ mem_log\n{0}".format(
+                str([x['log_index'] for x in self.mem_log])
+            ))
             tmp_deque = deque()
             for entry in reversed(self.mem_log):
                 # We need retain enough log entries in mem_log, so we can get
@@ -229,7 +247,14 @@ class RaftLog(object):
                     prev_index = entry['log_index']
                     prev_term = entry['log_term']
                     break
+            LOG.info("^^^^ peer.next_idx {0}".format(peer.next_idx))
+            LOG.info("^^^^ for replication to {0}, prev_index {1}, prev_term {2}".format(
+                str(peer.id), prev_index, prev_term
+            ))
             entries_for_replication = list(tmp_deque)
+        else:
+            prev_index = self.last_log_index
+            prev_term = self.last_log_term
         return entries_for_replication, prev_index, prev_term
 
     def append_entries_to_follower(self, prev_index, prev_term, append_entries):
@@ -287,6 +312,7 @@ class RaftLog(object):
             log_index=commit_to_log_index,
             log_term=term,
             log_type=settings.LOG_TYPE_COMMIT_CHG,
+            destaged_index=self.destaged_index,
         ))
 
     def check_and_update_commits(self, term, majority):
@@ -296,19 +322,23 @@ class RaftLog(object):
             log_term = entry['log_term']
             if log_term < term or log_index <= self.commited:
                 break
-            poll = 0
-            for peer_id, peer in self.progress.items():
-                LOG.debug('---- peer_id %s' % str(peer_id))
-                LOG.debug('---- node_id %s' % str(self.node_id))
-                if peer_id == self.node_id:
-                    poll += 1  # We do not maintain peer info of self node.
-                if peer.match_idx >= log_index:
-                    poll += 1
+            poll = self._peer_poll(log_index)
             if poll >= majority:
                 self.commited = log_index
                 break
         if old_commited < self.commited:
             self.write_commit_log(self.commited, term)
+
+    def _peer_poll(self, log_index):
+        poll = 0
+        for peer_id, peer in self.progress.items():
+            LOG.debug('---- peer_id %s' % str(peer_id))
+            LOG.debug('---- node_id %s' % str(self.node_id))
+            if peer_id == self.node_id:
+                poll += 1  # We do not maintain peer info of leader node.
+            elif peer.match_idx >= log_index:
+                poll += 1
+        return poll
 
     def get_commited_entries_for_apply(self):
         ret = []
@@ -318,3 +348,20 @@ class RaftLog(object):
                     log_index <= self.commited:
                 ret.append(entry)
         return ret
+
+    def destage_fully_replicated_log(self):
+        min_match_idx = min([
+            peer.match_idx for peer in self.progress.values()
+            if peer.id != self.node_id
+        ])
+        self.destaged_index = min(min_match_idx, self.last_applied)
+        self.remove_destaged_log()
+
+    def remove_destaged_log(self):
+        while True:
+            entry = self.mem_log[0]
+            if entry['log_index'] < self.destaged_index:
+                self.destaged_term = entry['log_term']
+                self.mem_log.popleft()
+            else:
+                break
